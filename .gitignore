@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Local outputs/state (can be large)
+output/
+state.sqlite
+
+# VT downloader outputs/state
+vt_apk_downloader/output/
+vt_apk_downloader/state.sqlite
+
+# Keep secrets out of git
+vt_apk_downloader/config.yaml

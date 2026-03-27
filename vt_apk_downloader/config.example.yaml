@@ -1,0 +1,110 @@
+# VirusTotal APK dataset builder configuration
+#
+# Copy this file to `config.yaml` and fill in your API keys.
+#
+# IMPORTANT:
+# - Fill in your API keys below.
+# - This project intentionally exports *hashes/metadata only* and does NOT download APK binaries.
+#   (Mass-downloading malware binaries can be harmful and may violate policies/terms.)
+
+api:
+  base_url: "https://www.virustotal.com/api/v3"
+
+  # Key rotation is round-robin among eligible keys.
+  # Mark each key tier so the script can select premium-only endpoints correctly.
+  keys:
+    - name: "public_1"
+      key: ""
+      tier: "free"     # free | premium
+    - name: "public_2"
+      key: ""
+      tier: "free"
+    - name: "public_3"
+      key: ""
+      tier: "free"
+    - name: "premium_1"
+      key: ""
+      tier: "premium"
+    - name: "premium_2"
+      key: ""
+      tier: "premium"
+
+  # Networking / resilience
+  timeout_sec: 60
+  max_attempts_per_request: 12
+  backoff_initial_sec: 2
+  backoff_max_sec: 60
+
+  # Parallelism
+  # How many worker threads to use when collecting multiple families.
+  # NOTE: More workers only helps if you have multiple premium keys and enough quota.
+  max_workers: 1
+
+  # Optional rate limiting knobs.
+  # These help you stay within your VT tenant's quotas and avoid HTTP 429.
+  rate_limit:
+    # Minimum delay between requests *per key tier* (seconds).
+    # Keys are also marked "in-flight" so a single key isn't used concurrently.
+    per_key_min_interval_sec:
+      premium: 1.0
+      free: 15.0
+
+    # Optional global pacing applied across *all* requests (across keys/threads).
+    # Set to 0 to disable.
+    global_min_interval_sec: 0.0
+
+    # Optional jitter to add to sleeps (seconds). Helps avoid synchronized bursts.
+    jitter_sec: 0.25
+
+    # Maximum number of in-flight HTTP requests at a time.
+    # Set to 0 to disable (unlimited). A small number like 4-16 is usually sensible.
+    max_in_flight_requests: 0
+
+  # If every eligible key for a request is rate-limited/quota-exhausted, sleep this long.
+  all_keys_exhausted_sleep_hours: 24
+
+dataset:
+  output_dir: "output"
+  state_db_path: "state.sqlite"
+
+  # Hard constraints
+  max_file_size_bytes: 512000   # ~500 KB
+
+  malicious:
+    total_target: 50000
+    min_malicious_vendors: 10
+    families:
+      - "Ahmyth"
+      - "Spymax"
+      - "Spynote"
+      - "Anubis"
+      - "Triada"
+      - "SMSthief"
+      - "Cerberus"
+      - "SMSreg"
+      - "Bankbot"
+
+  benign:
+    total_target: 50000
+    # "Not detected by any vendor" interpreted as:
+    # last_analysis_stats.malicious == 0 AND last_analysis_stats.suspicious == 0
+    max_malicious_vendors: 0
+    max_suspicious_vendors: 0
+
+search:
+  # Intelligence Search is premium-only on VirusTotal.
+  # Adjust these templates if your VT tenant uses different tagging/field conventions.
+  #
+  # NOTE: VT Intelligence query syntax is powerful but varies by plan; keep it configurable.
+  limit: 100
+
+  # Common query parts
+  common_apk_size_filter: "type:apk size:{max_size_kb}KB-"
+
+  # Malware-family query template.
+  # Many VT datasets expose family as a tag. If your tenant uses a different operator,
+  # change tag:{family} accordingly.
+  malicious_template: "{common} tag:{family} positives:{min_positives}+"
+
+  # Benign query template.
+  benign_template: "{common} positives:0"
