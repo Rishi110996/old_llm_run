@@ -41,6 +41,18 @@ class VTApiError(RuntimeError):
         self.details = details or {}
 
 
+def _vt_error_message(err: VTApiError) -> str:
+    """Extract a human message from VTApiError details if possible."""
+    try:
+        if isinstance(err.details, dict):
+            e = err.details.get("error")
+            if isinstance(e, dict) and e.get("message"):
+                return str(e.get("message"))
+    except Exception:
+        pass
+    return str(getattr(err, "message", "") or "")
+
+
 @dataclasses.dataclass
 class ApiKey:
     name: str
@@ -602,9 +614,26 @@ def collect_category(
 
     try:
         while added < remaining:
-            items, cursor = vt_intelligence_search(
-                client, query=query, limit=limit, cursor=cursor
-            )
+            try:
+                items, cursor = vt_intelligence_search(
+                    client, query=query, limit=limit, cursor=cursor
+                )
+            except VTApiError as e:
+                # VT returns 400 for invalid query syntax/fields/values.
+                # For per-family collection, this often happens when the configured
+                # family value isn't recognized by the query template (e.g. tag:{family}).
+                # Don't crash the entire run; print actionable info and skip this bucket.
+                if int(getattr(e, "status_code", 0)) == 400:
+                    msg = _vt_error_message(e)
+                    print(f"[{category}:{bucket}] VT query error (400): {msg}")
+                    print(f"[{category}:{bucket}] Query was: {query}")
+                    print(
+                        f"[{category}:{bucket}] Hint: update `search.malicious_template` "
+                        "and/or `dataset.malicious.families` in config.yaml to match your "
+                        "VT tenant's query syntax / tag naming."
+                    )
+                    return added
+                raise
             if not items:
                 print(f"[{category}:{bucket}] no more results from search")
                 break
