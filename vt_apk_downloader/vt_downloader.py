@@ -57,6 +57,33 @@ def _vt_error_message(err: VTApiError) -> str:
     return str(getattr(err, "message", "") or "")
 
 
+def classify_download_error(err: Exception) -> Dict[str, Any]:
+    reason = str(err)
+    permanent = False
+
+    if isinstance(err, VTApiError):
+        message = _vt_error_message(err).lower()
+        if err.status_code in {400, 404, 410, 422}:
+            permanent = True
+        elif any(
+            token in message
+            for token in (
+                "not found",
+                "not available",
+                "is not downloadable",
+                "not downloadable",
+                "download is not allowed",
+                "unsupported",
+            )
+        ):
+            permanent = True
+
+    return {
+        "reason": reason,
+        "permanent": permanent,
+    }
+
+
 @dataclasses.dataclass
 class ApiKey:
     name: str
@@ -571,6 +598,18 @@ class StateDB:
             );
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS download_states (
+              sha256 TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              permanent_failure INTEGER NOT NULL DEFAULT 0,
+              fail_count INTEGER NOT NULL DEFAULT 0,
+              last_error TEXT,
+              last_attempt_at_utc TEXT NOT NULL
+            );
+            """
+        )
         self.conn.commit()
 
     def has(self, sha256: str) -> bool:
@@ -779,6 +818,60 @@ class StateDB:
                 }
             )
         return rows
+
+    def record_download_success(self, *, sha256: str) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO download_states
+              (sha256, status, permanent_failure, fail_count, last_error, last_attempt_at_utc)
+            VALUES (?, 'downloaded', 0, 0, NULL, ?)
+            ON CONFLICT(sha256) DO UPDATE SET
+              status = 'downloaded',
+              permanent_failure = 0,
+              last_error = NULL,
+              last_attempt_at_utc = excluded.last_attempt_at_utc;
+            """,
+            (
+                sha256,
+                dt.datetime.now(tz=dt.timezone.utc).isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def record_download_failure(self, *, sha256: str, reason: str, permanent: bool) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO download_states
+              (sha256, status, permanent_failure, fail_count, last_error, last_attempt_at_utc)
+            VALUES (?, ?, ?, 1, ?, ?)
+            ON CONFLICT(sha256) DO UPDATE SET
+              status = excluded.status,
+              permanent_failure = excluded.permanent_failure,
+              fail_count = download_states.fail_count + 1,
+              last_error = excluded.last_error,
+              last_attempt_at_utc = excluded.last_attempt_at_utc;
+            """,
+            (
+                sha256,
+                "permanent_failed" if permanent else "retryable_failed",
+                1 if permanent else 0,
+                reason,
+                dt.datetime.now(tz=dt.timezone.utc).isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def is_permanent_download_failure(self, *, sha256: str) -> bool:
+        cur = self.conn.execute(
+            """
+            SELECT permanent_failure
+            FROM download_states
+            WHERE sha256 = ?;
+            """,
+            (sha256,),
+        )
+        row = cur.fetchone()
+        return bool(row[0]) if row is not None else False
 
 
 def vt_intelligence_search(
@@ -1124,7 +1217,7 @@ def index_family_catalog(
     }
 
 
-def collect_assigned_sha256s(report_root: str, *, category: str) -> set[str]:
+def collect_assigned_sha256s(db: StateDB, report_root: str, *, category: str) -> set[str]:
     assigned: set[str] = set()
     for summary_path in batch_summary_paths(report_root):
         payload = read_batch_summary(summary_path)
@@ -1132,7 +1225,7 @@ def collect_assigned_sha256s(report_root: str, *, category: str) -> set[str]:
             continue
         for rec in payload.get("records") or []:
             sha256 = rec.get("sha256")
-            if sha256:
+            if sha256 and not db.is_permanent_download_failure(sha256=str(sha256)):
                 assigned.add(str(sha256))
     return assigned
 
@@ -1150,6 +1243,8 @@ def plan_weighted_family_batch(
     queues: Dict[str, List[dict]] = {fam: [] for fam in families}
     for row in family_rows:
         if row["sha256"] in assigned_sha256s:
+            continue
+        if db.is_permanent_download_failure(sha256=row["sha256"]):
             continue
         if row.get("downloadable") is False:
             continue
@@ -1210,6 +1305,7 @@ def plan_weighted_family_batch(
 
 def download_records(
     *,
+    db: StateDB,
     client: VTClient,
     records: List[dict],
     samples_dir: str,
@@ -1220,7 +1316,8 @@ def download_records(
     ensure_dir(samples_dir)
 
     downloaded: List[dict] = []
-    skipped: List[dict] = []
+    permanent_failures: List[dict] = []
+    transient_failures: List[dict] = []
     exhausted_reason: Optional[str] = None
     pbar = tqdm(total=len(records), desc=f"download:{bucket_label}") if show_progress else None
 
@@ -1230,12 +1327,25 @@ def download_records(
             dest_path = os.path.join(samples_dir, f"{sha256}.apk")
             try:
                 if rec.get("downloadable") is False:
-                    skipped.append(
+                    reason = "VT marked sample as non-downloadable"
+                    permanent_failures.append(
                         {"sha256": sha256, "reason": "VT marked sample as non-downloadable"}
+                    )
+                    db.record_download_failure(
+                        sha256=sha256,
+                        reason=reason,
+                        permanent=True,
+                    )
+                    continue
+
+                if db.is_permanent_download_failure(sha256=sha256):
+                    permanent_failures.append(
+                        {"sha256": sha256, "reason": "Previously marked as permanent download failure"}
                     )
                     continue
 
                 if os.path.exists(dest_path) and not overwrite_existing:
+                    db.record_download_success(sha256=sha256)
                     downloaded.append(
                         {
                             "sha256": sha256,
@@ -1246,6 +1356,7 @@ def download_records(
                     continue
 
                 client.download_file(sha256, dest_path, required_tier="premium")
+                db.record_download_success(sha256=sha256)
                 downloaded.append(
                     {
                         "sha256": sha256,
@@ -1257,7 +1368,17 @@ def download_records(
                 exhausted_reason = str(e)
                 break
             except Exception as e:
-                skipped.append({"sha256": sha256, "reason": str(e)})
+                failure = classify_download_error(e)
+                row = {"sha256": sha256, "reason": failure["reason"]}
+                if failure["permanent"]:
+                    permanent_failures.append(row)
+                else:
+                    transient_failures.append(row)
+                db.record_download_failure(
+                    sha256=sha256,
+                    reason=failure["reason"],
+                    permanent=bool(failure["permanent"]),
+                )
             finally:
                 if pbar:
                     pbar.update(1)
@@ -1267,7 +1388,8 @@ def download_records(
 
     return {
         "downloaded": downloaded,
-        "skipped": skipped,
+        "permanent_failures": permanent_failures,
+        "transient_failures": transient_failures,
         "exhausted": bool(exhausted_reason),
         "exhausted_reason": exhausted_reason,
     }
@@ -1402,6 +1524,7 @@ def print_batch_summaries(
         "batches": 0,
         "records": 0,
         "pending_downloads": 0,
+        "terminal_download_failures": 0,
         "done": 0,
         "failed": 0,
         "corrupt": 0,
@@ -1421,12 +1544,14 @@ def print_batch_summaries(
         report_dir = os.path.dirname(summary_path)
         analysis_counts = read_analysis_counts(report_dir)
         pending_downloads = len(payload.get("pending_downloads") or [])
+        terminal_download_failures = int(payload.get("terminal_download_failure_count") or 0)
         record_count = len(payload.get("records") or [])
         status = str(payload.get("status") or "unknown")
 
         aggregate["batches"] += 1
         aggregate["records"] += record_count
         aggregate["pending_downloads"] += pending_downloads
+        aggregate["terminal_download_failures"] += terminal_download_failures
         for key in ("done", "failed", "corrupt", "in_progress"):
             aggregate[key] += int(analysis_counts.get(key, 0))
 
@@ -1439,6 +1564,7 @@ def print_batch_summaries(
                     "status": status,
                     "records": record_count,
                     "pending_downloads": pending_downloads,
+                    "terminal_download_failures": terminal_download_failures,
                     "analysis_counts": analysis_counts,
                     "report_dir": report_dir,
                     "samples_dir": payload.get("samples_dir"),
@@ -1473,6 +1599,7 @@ def batch_matches_selection(
 
 def process_batch_from_summary(
     *,
+    db: StateDB,
     client: VTClient,
     summary_path: str,
     overwrite_existing: bool,
@@ -1494,6 +1621,7 @@ def process_batch_from_summary(
     payload["last_attempt_utc"] = dt.datetime.now(tz=dt.timezone.utc).isoformat()
 
     download_result = download_records(
+        db=db,
         client=client,
         records=records,
         samples_dir=samples_dir,
@@ -1503,18 +1631,43 @@ def process_batch_from_summary(
     )
     payload["last_download_result"] = download_result
 
+    terminal_failures: Dict[str, dict] = {
+        str(row.get("sha256")): row
+        for row in (payload.get("terminal_download_failures") or [])
+        if row.get("sha256")
+    }
+    for row in download_result.get("permanent_failures") or []:
+        sha256 = row.get("sha256")
+        if sha256:
+            terminal_failures[str(sha256)] = row
+    payload["terminal_download_failures"] = list(terminal_failures.values())
+
     local_apks = {
         os.path.splitext(name)[0]
         for name in os.listdir(samples_dir)
         if name.lower().endswith(".apk")
     } if os.path.isdir(samples_dir) else set()
 
+    terminal_failed_sha256s = set(terminal_failures.keys())
     pending_downloads = [
         rec["sha256"]
         for rec in records
-        if rec.get("downloadable") is not False and rec["sha256"] not in local_apks
+        if rec.get("downloadable") is not False
+        and rec["sha256"] not in local_apks
+        and rec["sha256"] not in terminal_failed_sha256s
     ]
     payload["pending_downloads"] = pending_downloads
+    payload["terminal_download_failure_count"] = len(terminal_failed_sha256s)
+
+    downloaded_now = len(download_result.get("downloaded") or [])
+    permanent_now = len(download_result.get("permanent_failures") or [])
+    transient_now = len(download_result.get("transient_failures") or [])
+    print(
+        f"[download-summary:{bucket_label}] downloaded={len(local_apks)} "
+        f"new_or_reused_this_run={downloaded_now} permanent_failures_now={permanent_now} "
+        f"transient_failures_now={transient_now} pending_retryable={len(pending_downloads)} "
+        f"terminal_failures_total={len(terminal_failed_sha256s)}"
+    )
 
     if download_result.get("exhausted"):
         payload["status"] = "download_paused_key_exhausted"
@@ -1537,7 +1690,10 @@ def process_batch_from_summary(
     if not local_apks:
         payload["status"] = "completed_no_downloads"
         write_batch_summary(summary_path, payload)
-        print(f"[batch:{bucket_label}] no local APKs available to analyze")
+        print(
+            f"[batch:{bucket_label}] no local APKs available to analyze; "
+            f"terminal_download_failures={len(terminal_failed_sha256s)}"
+        )
         return True
 
     if analyze_enabled:
@@ -1837,10 +1993,12 @@ def main() -> int:
                     "samples_dir": samples_dir,
                     "records": new_records,
                     "status": "created",
+                    "terminal_download_failures": [],
                 },
             )
 
         return process_batch_from_summary(
+            db=db,
             client=client,
             summary_path=summary_path,
             overwrite_existing=overwrite_existing,
@@ -1875,6 +2033,7 @@ def main() -> int:
         print(f"[resume] Found {len(pending)} pending batch(es). Resuming them before collecting new samples.")
         for summary_path in pending:
             ok = process_batch_from_summary(
+                db=db,
                 client=client,
                 summary_path=summary_path,
                 overwrite_existing=overwrite_existing,
@@ -1937,7 +2096,11 @@ def main() -> int:
 
             if download_enabled:
                 assert report_root is not None
-                assigned_sha256s = collect_assigned_sha256s(report_root, category="malicious")
+                assigned_sha256s = collect_assigned_sha256s(
+                    db,
+                    report_root,
+                    category="malicious",
+                )
                 remaining_target = max(0, overall_malicious_target - len(assigned_sha256s))
 
                 if remaining_target <= 0:

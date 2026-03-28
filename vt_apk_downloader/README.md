@@ -85,6 +85,8 @@ The planner uses VT size metadata plus the set of already-assigned samples from 
 - If a run fails during download or analysis, rerun the same command and the downloader will resume pending batches before collecting anything new.
 - If all eligible VT API keys are exhausted, the script stops cleanly, keeps progress/state, and can be rerun later.
 - If keys are exhausted in the middle of a download batch, the batch is marked `download_paused_key_exhausted` and rerunning later resumes the same batch instead of creating a new one.
+- Permanent VT download failures are recorded and excluded from future planning so the downloader does not keep waiting forever on samples VT will never return.
+- Retryable download failures stay pending and are retried on the next run.
 - The analyzer now keeps `analysis_state.sqlite` in the batch report folder.
 - Samples marked `done` are skipped on rerun.
 - Samples marked `corrupt` are skipped on rerun.
@@ -116,6 +118,8 @@ Print existing batch status from `batch_summary.json` plus analyzer counts from 
 ```bash
 python vt_downloader.py --config config.yaml --summary-only
 ```
+
+The summary now also includes terminal download failure counts, so you can tell the difference between retryable pending downloads and samples that VT will never return.
 
 Restrict the summary to selected malicious families:
 
