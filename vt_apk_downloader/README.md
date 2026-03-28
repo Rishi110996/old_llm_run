@@ -32,6 +32,23 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+For the full download + analysis pipeline on the server, install the repo-level requirements file instead:
+
+```bash
+cd /path/to/old_llm_run
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.server.txt
+```
+
+The server also needs these non-Python tools available on `PATH`:
+
+- `java`
+- `apktool`
+- `keytool`
+- `yara`
+- `libmagic` (needed by `python-magic` on Linux)
+
 Edit `config.yaml` and paste your API keys.
 
 Tip: if you use git, keep your real `config.yaml` out of version control (see `.gitignore`) and commit `config.example.yaml` instead.
