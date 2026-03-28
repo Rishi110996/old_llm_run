@@ -1221,6 +1221,7 @@ def download_records(
 
     downloaded: List[dict] = []
     skipped: List[dict] = []
+    exhausted_reason: Optional[str] = None
     pbar = tqdm(total=len(records), desc=f"download:{bucket_label}") if show_progress else None
 
     try:
@@ -1252,6 +1253,9 @@ def download_records(
                         "reused_existing": False,
                     }
                 )
+            except AllKeysExhaustedError as e:
+                exhausted_reason = str(e)
+                break
             except Exception as e:
                 skipped.append({"sha256": sha256, "reason": str(e)})
             finally:
@@ -1264,6 +1268,8 @@ def download_records(
     return {
         "downloaded": downloaded,
         "skipped": skipped,
+        "exhausted": bool(exhausted_reason),
+        "exhausted_reason": exhausted_reason,
     }
 
 
@@ -1483,7 +1489,7 @@ def process_batch_from_summary(
     report_dir = os.path.dirname(summary_path)
     category = str(payload.get("category") or "")
     family = payload.get("family")
-    bucket_label = f"{category}:{family or 'benign'}"
+    bucket_label = f"{category}:{family or 'all'}"
 
     payload["last_attempt_utc"] = dt.datetime.now(tz=dt.timezone.utc).isoformat()
 
@@ -1509,6 +1515,16 @@ def process_batch_from_summary(
         if rec.get("downloadable") is not False and rec["sha256"] not in local_apks
     ]
     payload["pending_downloads"] = pending_downloads
+
+    if download_result.get("exhausted"):
+        payload["status"] = "download_paused_key_exhausted"
+        payload["pause_reason"] = str(download_result.get("exhausted_reason") or "")
+        write_batch_summary(summary_path, payload)
+        print(
+            f"[batch:{bucket_label}] paused with {len(pending_downloads)} download(s) still pending: "
+            f"{payload['pause_reason']}"
+        )
+        raise AllKeysExhaustedError(payload["pause_reason"])
 
     if pending_downloads:
         payload["status"] = "download_incomplete"
