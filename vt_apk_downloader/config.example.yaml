@@ -62,15 +62,23 @@ api:
 
   # If every eligible key for a request is rate-limited/quota-exhausted, sleep this long.
   all_keys_exhausted_sleep_hours: 24
+  stop_when_all_keys_exhausted: true
 
 dataset:
   output_dir: "output"
   state_db_path: "state.sqlite"
+  downloads:
+    enabled: true
+    download_dir: "/mnt/ext_storage/vt_apk_samples"
+    overwrite_existing: false
+    selected_families: []  # empty means use all configured malicious families
+    max_batch_total_bytes: 53687091200  # 50 GB
 
   # Hard constraints
   max_file_size_bytes: 512000   # ~500 KB
 
   malicious:
+    # Global malicious target across all configured families.
     total_target: 50000
     min_malicious_vendors: 10
     families:
@@ -83,6 +91,10 @@ dataset:
       - "Cerberus"
       - "SMSreg"
       - "Bankbot"
+      - "Coper"
+      - "Mamont"
+      - "Anatsa"
+      - "Ermac"
 
   benign:
     total_target: 50000
@@ -99,12 +111,18 @@ search:
   limit: 100
 
   # Common query parts
-  common_apk_size_filter: "type:apk size:{max_size_kb}KB-"
+  common_apk_size_filter: "type:apk and size:{max_size_kb}KB-"
 
   # Malware-family query template.
-  # Many VT datasets expose family as a tag. If your tenant uses a different operator,
-  # change tag:{family} accordingly.
-  malicious_template: "{common} tag:{family} positives:{min_positives}+"
+  # This VT tenant exposes family matches via the `engines:` operator.
+  malicious_template: "{common} and engines:{family} and p:{min_positives}+"
 
   # Benign query template.
-  benign_template: "{common} positives:0"
+  benign_template: "{common} and p:0"
+
+analysis:
+  enabled: true
+  script_path: "../llm_V1/modified_trial8_multiple_models.py"
+  report_dir: "/mnt/ext_storage/vt_analysis_reports"
+  cleanup_samples_after_analysis: true
+  cleanup_completed_samples_after_analysis: true

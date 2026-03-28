@@ -1,0 +1,91 @@
+2025-08-29 13:16:34,299 - apps.signature.tasks - INFO - --------Started writing rules---------------
+2025-08-29 13:16:34,394 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:16:34,394 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:16:34,394 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:16:36,640 - apps.signature.tasks - INFO - thirdparty-sig.yara source and hash 933d4d673085bd31dae6e9d52caa9cf9
+2025-08-29 13:16:36,726 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:16:36,726 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:16:36,726 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:16:36,851 - apps.signature.tasks - INFO - filetype-sig.yara source and hash 2488295b15efe25c19187bf0d82b71d3
+2025-08-29 13:16:36,925 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:16:36,926 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:16:36,926 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:16:37,281 - apps.signature.tasks - INFO - flash-sig.yara source and hash 0ae01531fbaaf25b65071933740a0918
+2025-08-29 13:16:37,371 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:16:37,371 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:16:37,371 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:16:37,466 - apps.signature.tasks - INFO - installer-sig.yara source and hash 73e5cea75eb72fd73e117a7e6a485bf0
+2025-08-29 13:16:37,542 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:16:37,542 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:16:37,542 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:16:37,654 - apps.signature.tasks - INFO - java-sig.yara source and hash 1fcc5572dca890735810a8fe36ec3f68
+2025-08-29 13:16:37,722 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:16:37,722 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:16:37,722 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:16:38,056 - apps.signature.tasks - INFO - office-sig.yara source and hash ac0a893862106b40b6df04826709c5a2
+2025-08-29 13:16:38,146 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:16:38,146 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:16:38,146 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:16:39,160 - apps.signature.tasks - INFO - packer-sig.yara source and hash e6fb9c0854ed1f53fc74fbe61299e4dd
+2025-08-29 13:16:39,232 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:16:39,232 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:16:39,232 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:16:39,561 - apps.signature.tasks - INFO - pdf-sig.yara source and hash 16914e3b9ab1d6bbe5cbf9d4717d780f
+2025-08-29 13:16:39,646 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:16:39,646 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:16:39,646 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:16:39,737 - apps.signature.tasks - INFO - shellcode-sig.yara source and hash a22f5818dcf8e8f4c78b4724619373bc
+2025-08-29 13:16:39,832 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:16:39,832 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:16:39,832 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:16:39,910 - apps.signature.tasks - INFO - silverlight-sig.yara source and hash c60aea9efc496b30105bc12a35f25be3
+2025-08-29 13:16:39,955 - apps.signature.tasks - INFO - Rule 139632 was ready but FP test already done True. And FP test result is []
+2025-08-29 13:16:39,956 - apps.signature.tasks - INFO - Rule 139631 was ready but FP test already done True. And FP test result is []
+2025-08-29 13:16:39,957 - apps.signature.tasks - INFO - Rule 139627 was ready but FP test already done True. And FP test result is []
+2025-08-29 13:16:39,957 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:16:39,957 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:16:39,957 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:16:40,228 - apps.signature.tasks - INFO - Reviewed Rules to be released Win64_Trojan_TOSHIS
+2025-08-29 13:16:40,255 - apps.signature.tasks - INFO - Reviewed Rules to be released LNK_Downloader_Ducktail
+2025-08-29 13:16:40,258 - apps.signature.tasks - INFO - Reviewed Rules to be released Win64_Loader_MorpheusLoader
+2025-08-29 13:16:53,597 - apps.signature.tasks - INFO - zstatic-sig.yara source and hash d6bfe99fc90762fc64da1932c93e8f3a
+2025-08-29 13:16:53,685 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:16:53,685 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:16:53,685 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:16:54,404 - apps.signature.tasks - INFO - zstatic-apk-sig.yara source and hash e745f1d68c6c4ebcf9b7f7bf0e166e0d
+2025-08-29 13:16:54,456 - apps.signature.tasks - INFO - Ready rule Win64_Downloader_MorpheusLoader_139628
+2025-08-29 13:16:54,458 - apps.signature.tasks - INFO - Ready rule Win32_PUA_PCHealpsoft_139023
+2025-08-29 13:16:54,458 - apps.signature.tasks - INFO - List of Rules ready for compile [139628, 139023]
+2025-08-29 13:16:54,460 - apps.signature.tasks - INFO - Clean file Folders dynamic_ba_yara/clean
+2025-08-29 13:16:58,999 - apps.signature.tasks - INFO - Clean file Folders dynamic_ba_yara/malware
+2025-08-29 13:17:15,022 - apps.signature.tasks - INFO - Clean file Folders top100
+2025-08-29 13:17:44,590 - apps.signature.tasks - INFO - Clean file Folders cyber_rating
+2025-08-29 13:18:27,648 - apps.signature.tasks - INFO - Ready Rules list [139628, 139023]
+2025-08-29 13:18:27,648 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:18:27,648 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:18:27,769 - apps.signature.tasks - INFO - Reviewed Rules to be released Win64_Downloader_MorpheusLoader
+2025-08-29 13:18:27,772 - apps.signature.tasks - INFO - Reviewed Rules to be released Win32_PUA_PCHealpsoft
+2025-08-29 13:18:30,699 - apps.signature.tasks - INFO - dynamic_ba_yara.yara source and hash f6226eaff3df89ad43658c98ce8c36b2
+2025-08-29 13:18:30,777 - apps.signature.tasks - INFO - Ready Rules list []
+2025-08-29 13:18:30,777 - apps.signature.tasks - INFO - FP Detected Rules list []
+2025-08-29 13:18:30,777 - apps.signature.tasks - INFO - Fp Exception Rules list  []
+2025-08-29 13:18:31,381 - apps.signature.tasks - INFO - android_malware.yara source and hash 011a001b3039dd016d4692168b8d92ec
+2025-08-29 13:18:31,951 - apps.signature.tasks - INFO - Copying file on server
+2025-08-29 13:18:32,697 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/thirdparty-sig.yara
+2025-08-29 13:18:32,723 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/filetype-sig.yara
+2025-08-29 13:18:32,737 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/flash-sig.yara
+2025-08-29 13:18:32,746 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/installer-sig.yara
+2025-08-29 13:18:32,753 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/java-sig.yara
+2025-08-29 13:18:32,762 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/office-sig.yara
+2025-08-29 13:18:32,772 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/packer-sig.yara
+2025-08-29 13:18:32,786 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/pdf-sig.yara
+2025-08-29 13:18:32,794 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/shellcode-sig.yara
+2025-08-29 13:18:32,801 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/silverlight-sig.yara
+2025-08-29 13:18:32,809 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/zstatic-sig.yara
+2025-08-29 13:18:32,936 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/zstatic-apk-sig.yara
+2025-08-29 13:18:32,945 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/dynamic_ba_yara.yara
+2025-08-29 13:18:32,965 - apps.signature.tasks - INFO - /var/www/html/zintel/media/yara/export_2509/android_malware.yara
+2025-08-29 13:18:33,080 - apps.signature.tasks - INFO - Total ready sigs were 5 and total released are 5
+2025-08-29 13:18:33,082 - apps.signature.tasks - INFO - Generate yara threat library feeds
+2025-08-29 13:18:33,088 - apps.signature.tasks - INFO - Change ready pending rules to ready
+2025-08-29 13:18:33,287 - apps.signature.tasks - INFO - Disable false positive rules

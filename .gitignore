@@ -12,3 +12,4 @@ vt_apk_downloader/state.sqlite
 
 # Keep secrets out of git
 vt_apk_downloader/config.yaml
+llm_V1/config.json
