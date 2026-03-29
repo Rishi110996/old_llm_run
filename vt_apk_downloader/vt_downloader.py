@@ -112,6 +112,7 @@ class KeyRing:
         keys: List[ApiKey],
         exhausted_sleep_hours: float = 24.0,
         stop_when_exhausted: bool = False,
+        stop_when_exhausted_min_wait_sec: float = 300.0,
     ):
         if not keys:
             raise ValueError("No API keys configured")
@@ -119,6 +120,7 @@ class KeyRing:
         self._idx = 0
         self._exhausted_sleep_hours = exhausted_sleep_hours
         self._stop_when_exhausted = bool(stop_when_exhausted)
+        self._stop_when_exhausted_min_wait_sec = float(stop_when_exhausted_min_wait_sec)
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
 
@@ -200,16 +202,17 @@ class KeyRing:
                         f"All API keys are disabled (tier requirement: {required_tier!r})."
                     )
 
-                if self._stop_when_exhausted:
-                    raise AllKeysExhaustedError(
-                        f"All eligible API keys are exhausted or cooling down (tier={required_tier!r})."
-                    )
-
                 soonest = min(k.cooldown_until_utc for k in eligible)
 
                 wait_sec = max(0.0, (soonest - now_dt).total_seconds())
                 if wait_sec <= 0:
                     wait_sec = 0.25
+
+                if self._stop_when_exhausted and wait_sec >= self._stop_when_exhausted_min_wait_sec:
+                    raise AllKeysExhaustedError(
+                        "All eligible API keys are exhausted or cooling down "
+                        f"(tier={required_tier!r}, next_available_in={wait_sec:.2f}s)."
+                    )
 
                 elapsed = time.monotonic() - start
                 if elapsed >= max_sleep_sec:
@@ -2036,6 +2039,9 @@ def main() -> int:
         keys,
         exhausted_sleep_hours=float(api_cfg["all_keys_exhausted_sleep_hours"]),
         stop_when_exhausted=bool(api_cfg.get("stop_when_all_keys_exhausted", True)),
+        stop_when_exhausted_min_wait_sec=float(
+            api_cfg.get("stop_when_all_keys_exhausted_min_wait_sec") or 300.0
+        ),
     )
 
     if args.debug_keys:

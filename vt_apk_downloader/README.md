@@ -86,6 +86,7 @@ The default VT filter is also stricter now: `type:apk and tag:apk and not tag:fa
 - Each downloaded batch gets a `batch_summary.json` manifest before download starts.
 - If a run fails during download or analysis, rerun the same command and the downloader will resume pending batches before collecting anything new.
 - If all eligible VT API keys are exhausted, the script stops cleanly, keeps progress/state, and can be rerun later.
+- Short per-key cooldown windows are now waited out automatically; graceful stop only triggers when the next key availability is still far enough away to look like a real quota/rate-limit exhaustion event.
 - If keys are exhausted in the middle of a download batch, the batch is marked `download_paused_key_exhausted` and rerunning later resumes the same batch instead of creating a new one.
 - Permanent VT download failures are recorded and excluded from future planning so the downloader does not keep waiting forever on samples VT will never return.
 - Retryable download failures stay pending and are retried on the next run.
@@ -208,7 +209,8 @@ By default the malicious query now uses `engines:{family}` with `p:{min_positive
 - Keys are used round-robin.
 - On HTTP 429 (rate limit), a key goes into cooldown (based on `Retry-After` if present).
 - On 401/403, the key is disabled for the rest of the run.
-- If all eligible keys are exhausted, the script sleeps for `api.all_keys_exhausted_sleep_hours` (default 24h) and then resumes.
+- Short cooldowns are waited out automatically.
+- If the next eligible key is still far in the future, the script can stop cleanly based on `api.stop_when_all_keys_exhausted: true` and `api.stop_when_all_keys_exhausted_min_wait_sec`.
 
 ## Concurrency + rate limiting
 

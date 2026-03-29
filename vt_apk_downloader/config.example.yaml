@@ -63,6 +63,7 @@ api:
   # If every eligible key for a request is rate-limited/quota-exhausted, sleep this long.
   all_keys_exhausted_sleep_hours: 24
   stop_when_all_keys_exhausted: true
+  stop_when_all_keys_exhausted_min_wait_sec: 300
 
 dataset:
   output_dir: "output"
