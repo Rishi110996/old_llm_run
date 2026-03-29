@@ -225,6 +225,38 @@ class KeyRing:
                 )
                 self._cond.wait(timeout=wait_sec)
 
+    def snapshot(self, required_tier: Optional[str] = None) -> List[dict]:
+        now = dt.datetime.now(tz=dt.timezone.utc)
+        rows: List[dict] = []
+        with self._lock:
+            for key in self._keys:
+                if required_tier and key.tier != required_tier:
+                    continue
+
+                in_flight = key.in_flight_lock.locked()
+                cooldown_remaining_sec = max(
+                    0.0, (key.cooldown_until_utc - now).total_seconds()
+                )
+                if key.disabled:
+                    status = "disabled"
+                elif in_flight:
+                    status = "in_flight"
+                elif cooldown_remaining_sec > 0:
+                    status = "cooling_down"
+                else:
+                    status = "eligible"
+
+                rows.append(
+                    {
+                        "name": key.name,
+                        "tier": key.tier,
+                        "status": status,
+                        "cooldown_remaining_sec": round(cooldown_remaining_sec, 3),
+                        "last_error": key.last_error,
+                    }
+                )
+        return rows
+
 
 class VTClient:
     def __init__(
@@ -930,6 +962,8 @@ def extract_record(file_obj: dict) -> Optional[dict]:
     suspicious = int(stats.get("suspicious") or 0)
     meaningful_name = attrs.get("meaningful_name")
     downloadable = attrs.get("downloadable")
+    type_tag = attrs.get("type_tag")
+    tags = attrs.get("tags") or []
 
     return {
         "sha256": sha256,
@@ -938,6 +972,8 @@ def extract_record(file_obj: dict) -> Optional[dict]:
         "suspicious": suspicious,
         "meaningful_name": meaningful_name,
         "downloadable": True if downloadable is None else bool(downloadable),
+        "type_tag": type_tag,
+        "tags": list(tags) if isinstance(tags, list) else [],
         "raw": file_obj,
     }
 
@@ -956,6 +992,16 @@ def append_jsonl(path: str, obj: dict) -> None:
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False))
         f.write("\n")
+
+
+def has_apk_magic(path: str) -> bool:
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"PK\x03\x04"
+    except OSError:
+        return False
 
 
 def split_targets(total: int, families: List[str]) -> Dict[str, int]:
@@ -985,6 +1031,20 @@ def resolve_path(base_dir: str, configured_path: str) -> str:
 def sanitize_name(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
     return cleaned or "bucket"
+
+
+def is_apk_record(rec: dict) -> bool:
+    type_tag = str(rec.get("type_tag") or "").strip().lower()
+    tags = {str(tag).strip().lower() for tag in (rec.get("tags") or []) if str(tag).strip()}
+    meaningful_name = str(rec.get("meaningful_name") or "").strip().lower()
+
+    if "faulty" in tags:
+        return False
+
+    if type_tag == "apk" or "apk" in tags:
+        return True
+
+    return meaningful_name.endswith(".apk")
 
 
 def collect_category(
@@ -1057,6 +1117,8 @@ def collect_category(
                 rec = extract_record(it)
                 if not rec:
                     continue
+                if not is_apk_record(rec):
+                    continue
 
                 sha256 = rec["sha256"]
 
@@ -1093,6 +1155,8 @@ def collect_category(
                         "suspicious": rec.get("suspicious"),
                         "meaningful_name": rec.get("meaningful_name"),
                         "downloadable": rec.get("downloadable"),
+                        "type_tag": rec.get("type_tag"),
+                        "tags": rec.get("tags") or [],
                     },
                 )
 
@@ -1106,6 +1170,8 @@ def collect_category(
                         "suspicious": rec.get("suspicious"),
                         "meaningful_name": rec.get("meaningful_name"),
                         "downloadable": rec.get("downloadable"),
+                        "type_tag": rec.get("type_tag"),
+                        "tags": rec.get("tags") or [],
                     }
                 )
                 added += 1
@@ -1182,6 +1248,8 @@ def index_family_catalog(
         for it in items:
             rec = extract_record(it)
             if not rec:
+                continue
+            if not is_apk_record(rec):
                 continue
             size = rec.get("size")
             if isinstance(size, int) and size > max_size_bytes:
@@ -1345,17 +1413,35 @@ def download_records(
                     continue
 
                 if os.path.exists(dest_path) and not overwrite_existing:
-                    db.record_download_success(sha256=sha256)
-                    downloaded.append(
-                        {
-                            "sha256": sha256,
-                            "path": dest_path,
-                            "reused_existing": True,
-                        }
-                    )
-                    continue
+                    if has_apk_magic(dest_path):
+                        db.record_download_success(sha256=sha256)
+                        downloaded.append(
+                            {
+                                "sha256": sha256,
+                                "path": dest_path,
+                                "reused_existing": True,
+                            }
+                        )
+                        continue
+                    try:
+                        os.remove(dest_path)
+                    except OSError:
+                        pass
 
                 client.download_file(sha256, dest_path, required_tier="premium")
+                if not has_apk_magic(dest_path):
+                    try:
+                        os.remove(dest_path)
+                    except OSError:
+                        pass
+                    reason = "Downloaded payload did not match APK zip magic"
+                    permanent_failures.append({"sha256": sha256, "reason": reason})
+                    db.record_download_failure(
+                        sha256=sha256,
+                        reason=reason,
+                        permanent=True,
+                    )
+                    continue
                 db.record_download_success(sha256=sha256)
                 downloaded.append(
                     {
@@ -1645,7 +1731,7 @@ def process_batch_from_summary(
     local_apks = {
         os.path.splitext(name)[0]
         for name in os.listdir(samples_dir)
-        if name.lower().endswith(".apk")
+        if name.lower().endswith(".apk") and has_apk_magic(os.path.join(samples_dir, name))
     } if os.path.isdir(samples_dir) else set()
 
     terminal_failed_sha256s = set(terminal_failures.keys())
@@ -1799,6 +1885,11 @@ def main() -> int:
         action="store_true",
         help="Print batch/download/analysis status from existing batch manifests, then exit.",
     )
+    ap.add_argument(
+        "--debug-keys",
+        action="store_true",
+        help="Print VT key status (eligible/cooling_down/disabled/in_flight) and exit.",
+    )
     args = ap.parse_args()
 
     config_path = os.path.abspath(args.config)
@@ -1832,6 +1923,20 @@ def main() -> int:
         exhausted_sleep_hours=float(api_cfg["all_keys_exhausted_sleep_hours"]),
         stop_when_exhausted=bool(api_cfg.get("stop_when_all_keys_exhausted", True)),
     )
+
+    if args.debug_keys:
+        snapshot = keyring.snapshot(required_tier="premium")
+        print(
+            json.dumps(
+                {
+                    "required_tier": "premium",
+                    "count": len(snapshot),
+                    "keys": snapshot,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
 
     rate_cfg = api_cfg.get("rate_limit") or {}
     per_key_min = rate_cfg.get("per_key_min_interval_sec") or {}

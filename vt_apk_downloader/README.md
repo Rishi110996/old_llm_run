@@ -78,6 +78,8 @@ For malicious collection, `dataset.malicious.total_target` is treated as a globa
 
 The planner uses VT size metadata plus the set of already-assigned samples from prior batch manifests, so each rerun knows which malicious samples have already been planned/downloaded and only plans the next unassigned batch.
 
+The default VT filter is also stricter now: `type:apk and tag:apk and not tag:faulty`, and the downloader verifies APK ZIP magic locally before counting a file as successfully downloaded.
+
 ### Resume behavior
 
 - VT collection is deduplicated by SHA256 in `state.sqlite`, so reruns do not collect or download the same sample again.
@@ -120,6 +122,16 @@ python vt_downloader.py --config config.yaml --summary-only
 ```
 
 The summary now also includes terminal download failure counts, so you can tell the difference between retryable pending downloads and samples that VT will never return.
+
+### Debug VT key state
+
+Print current premium-key status and exit:
+
+```bash
+python vt_downloader.py --config config.yaml --debug-keys
+```
+
+This reports whether each premium key is currently `eligible`, `cooling_down`, `in_flight`, or `disabled`, along with its last error.
 
 Restrict the summary to selected malicious families:
 
@@ -178,7 +190,7 @@ When binary downloading is enabled, each run also creates a timestamped batch di
 
 ## Notes on family matching
 
-By default the malicious query now uses `engines:{family}` with `p:{min_positives}+` and the common APK filter uses `type:apk and size:{max_size_kb}KB-`. If your VT tenant uses a different field/operator, edit `search.malicious_template` in `config.yaml`.
+By default the malicious query now uses `engines:{family}` with `p:{min_positives}+` and the common APK filter uses `type:apk and tag:apk and not tag:faulty and size:{max_size_kb}KB-`. If your VT tenant uses a different field/operator, edit `search.malicious_template` in `config.yaml`.
 
 ## Key rotation / exhaustion
 

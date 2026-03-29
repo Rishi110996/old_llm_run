@@ -111,7 +111,7 @@ search:
   limit: 100
 
   # Common query parts
-  common_apk_size_filter: "type:apk and size:{max_size_kb}KB-"
+  common_apk_size_filter: "type:apk and tag:apk and not tag:faulty and size:{max_size_kb}KB-"
 
   # Malware-family query template.
   # This VT tenant exposes family matches via the `engines:` operator.
