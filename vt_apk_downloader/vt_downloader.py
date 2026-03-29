@@ -642,6 +642,17 @@ class StateDB:
             );
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analysis_states (
+              sha256 TEXT PRIMARY KEY,
+              status TEXT NOT NULL,
+              apk_name TEXT,
+              source_report_dir TEXT,
+              last_synced_at_utc TEXT NOT NULL
+            );
+            """
+        )
         self.conn.commit()
 
     def has(self, sha256: str) -> bool:
@@ -904,6 +915,51 @@ class StateDB:
         )
         row = cur.fetchone()
         return bool(row[0]) if row is not None else False
+
+    def record_analysis_status(
+        self,
+        *,
+        sha256: str,
+        status: str,
+        apk_name: Optional[str],
+        source_report_dir: str,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO analysis_states
+              (sha256, status, apk_name, source_report_dir, last_synced_at_utc)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(sha256) DO UPDATE SET
+              status = excluded.status,
+              apk_name = COALESCE(excluded.apk_name, analysis_states.apk_name),
+              source_report_dir = excluded.source_report_dir,
+              last_synced_at_utc = excluded.last_synced_at_utc;
+            """,
+            (
+                sha256,
+                status,
+                apk_name,
+                source_report_dir,
+                dt.datetime.now(tz=dt.timezone.utc).isoformat(),
+            ),
+        )
+        self.conn.commit()
+
+    def get_analysis_status(self, *, sha256: str) -> Optional[str]:
+        cur = self.conn.execute(
+            """
+            SELECT status
+            FROM analysis_states
+            WHERE sha256 = ?;
+            """,
+            (sha256,),
+        )
+        row = cur.fetchone()
+        return str(row[0]) if row is not None else None
+
+    def is_terminal_analysis_status(self, *, sha256: str) -> bool:
+        status = self.get_analysis_status(sha256=sha256)
+        return status in {"done", "corrupt"}
 
 
 def vt_intelligence_search(
@@ -1293,7 +1349,11 @@ def collect_assigned_sha256s(db: StateDB, report_root: str, *, category: str) ->
             continue
         for rec in payload.get("records") or []:
             sha256 = rec.get("sha256")
-            if sha256 and not db.is_permanent_download_failure(sha256=str(sha256)):
+            if (
+                sha256
+                and not db.is_permanent_download_failure(sha256=str(sha256))
+                and not db.is_terminal_analysis_status(sha256=str(sha256))
+            ):
                 assigned.add(str(sha256))
     return assigned
 
@@ -1313,6 +1373,8 @@ def plan_weighted_family_batch(
         if row["sha256"] in assigned_sha256s:
             continue
         if db.is_permanent_download_failure(sha256=row["sha256"]):
+            continue
+        if db.is_terminal_analysis_status(sha256=row["sha256"]):
             continue
         if row.get("downloadable") is False:
             continue
@@ -1593,6 +1655,51 @@ def read_analysis_rows(report_dir: str) -> List[dict]:
         conn.close()
 
 
+def sync_analysis_state_into_db(
+    *,
+    db: StateDB,
+    report_root: str,
+    only: str,
+    selected_families: List[str],
+) -> Dict[str, int]:
+    summaries = batch_summary_paths(report_root)
+    imported = 0
+    done = 0
+    corrupt = 0
+
+    for summary_path in summaries:
+        payload = read_batch_summary(summary_path)
+        if not batch_matches_selection(
+            payload,
+            only=only,
+            selected_families=selected_families,
+        ):
+            continue
+
+        report_dir = os.path.dirname(summary_path)
+        for row in read_analysis_rows(report_dir):
+            status = str(row.get("status") or "")
+            if status not in {"done", "corrupt"}:
+                continue
+            sha256 = row.get("sha256")
+            if not sha256:
+                continue
+
+            db.record_analysis_status(
+                sha256=str(sha256),
+                status=status,
+                apk_name=str(row.get("apk_name") or ""),
+                source_report_dir=report_dir,
+            )
+            imported += 1
+            if status == "done":
+                done += 1
+            elif status == "corrupt":
+                corrupt += 1
+
+    return {"imported": imported, "done": done, "corrupt": corrupt}
+
+
 def print_batch_summaries(
     *,
     report_root: str,
@@ -1788,6 +1895,13 @@ def process_batch_from_summary(
 
         analysis_rc = run_analysis(samples_dir, report_dir, analysis_script_path)
         payload["analysis_exit_code"] = analysis_rc
+        sync_counts = sync_analysis_state_into_db(
+            db=db,
+            report_root=os.path.dirname(report_dir),
+            only="all",
+            selected_families=[],
+        )
+        payload["analysis_state_sync"] = sync_counts
         if cleanup_completed_samples:
             cleanup_counts = cleanup_completed_sample_artifacts(samples_dir, report_dir)
             payload["cleanup_counts"] = cleanup_counts
@@ -2046,6 +2160,19 @@ def main() -> int:
     selected_families_cfg = download_cfg.get("selected_families") or []
     selected_families = list(args.families) if args.families else list(selected_families_cfg)
     selected_family_set = set(selected_families)
+
+    if report_root and os.path.isdir(report_root):
+        sync_counts = sync_analysis_state_into_db(
+            db=db,
+            report_root=report_root,
+            only=args.only,
+            selected_families=selected_families,
+        )
+        if sync_counts["imported"] > 0:
+            print(
+                f"[analysis-sync] imported={sync_counts['imported']} "
+                f"done={sync_counts['done']} corrupt={sync_counts['corrupt']}"
+            )
 
     if args.summary_only:
         if report_root is None:

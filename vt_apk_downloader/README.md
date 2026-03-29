@@ -90,6 +90,7 @@ The default VT filter is also stricter now: `type:apk and tag:apk and not tag:fa
 - Permanent VT download failures are recorded and excluded from future planning so the downloader does not keep waiting forever on samples VT will never return.
 - Retryable download failures stay pending and are retried on the next run.
 - The analyzer now keeps `analysis_state.sqlite` in the batch report folder.
+- Terminal analyzer results (`done` and `corrupt`) are also synced into the central `state.sqlite`, so future planning can exclude them even if older batch folders are later deleted.
 - Samples marked `done` are skipped on rerun.
 - Samples marked `corrupt` are skipped on rerun.
 - Samples marked `failed` are retried on rerun.
@@ -132,6 +133,16 @@ python vt_downloader.py --config config.yaml --debug-keys
 ```
 
 This reports whether each premium key is currently `eligible`, `cooling_down`, `in_flight`, or `disabled`, along with its last error.
+
+### Safe cleanup after analysis sync
+
+Before deleting old batch folders to free space, run:
+
+```bash
+python vt_downloader.py --config config.yaml --summary-only --only malicious
+```
+
+That imports existing `done` and `corrupt` analysis results from batch report folders into the central `state.sqlite`. After that sync has happened, future planning will continue excluding those SHA256s even if you delete the old batch folders.
 
 Restrict the summary to selected malicious families:
 
