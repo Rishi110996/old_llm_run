@@ -98,6 +98,7 @@ The default VT filter is also stricter now: `type:apk and tag:apk and not tag:fa
 - Corrupt means the APK could not be parsed by the Androguard-based analysis stage.
 - After each analysis pass, samples marked `done` or `corrupt` are deleted from the batch folder immediately.
 - If the whole batch finishes successfully and `cleanup_samples_after_analysis` is enabled, the remaining batch directory is removed entirely.
+- If `master_summary.log` is lost but the batch `analysis_state.sqlite` still exists, you can rebuild most or all of it with `python llm_V1/rebuild_master_summary.py <report_dir>`. Exact `done` entries require either the matching `*_verdict.json` or `*_llm_analysis.log`, because the SQLite row stores status and file paths but not the full verdict blob.
 
 ### Override families or sample cap for one run
 
