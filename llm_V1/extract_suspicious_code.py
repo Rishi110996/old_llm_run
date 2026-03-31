@@ -343,6 +343,7 @@ class APKAnalyzer:
         return list_susp_classes
 
     def extract_relevant_strings(self,max_depth):
+        instr_strings = []
         if self._susp_classes:
             instr_strings = self.extract_strings_from_classes(max_depth)
             # all_strings = extract_strings(self.analysis)

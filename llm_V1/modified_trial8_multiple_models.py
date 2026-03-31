@@ -433,8 +433,40 @@ def append_response_data(result_dict):
     return summaries,all_relevant,all_evidence
 
 
+def normalize_tool_list(value, *, logger, tool_name: str) -> List[Any]:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    if isinstance(value, dict) and value.get("error"):
+        logger.warning(f"[{tool_name}] tool returned error payload: {value['error']}")
+        return []
+    logger.warning(f"[{tool_name}] unexpected payload type {type(value).__name__}; treating as empty list")
+    return []
+
+
+def normalize_tool_dict(value, *, logger, tool_name: str) -> Dict[str, Any]:
+    if isinstance(value, dict) and not value.get("error"):
+        return value
+    if value is None:
+        return {}
+    if isinstance(value, dict) and value.get("error"):
+        logger.warning(f"[{tool_name}] tool returned error payload: {value['error']}")
+        return {}
+    logger.warning(f"[{tool_name}] unexpected payload type {type(value).__name__}; treating as empty dict")
+    return {}
+
+
 # -------------------- CHUNK ANALYZERS --------------------
 def analyze_strings_with_chunking(apk_strings: List[str], logger, model, chunk_size=200):
+    apk_strings = normalize_tool_list(apk_strings, logger=logger, tool_name="get_interesting_strings")
+    if not apk_strings:
+        return {
+            "summary": "",
+            "relevant_strings": [],
+            "evidence": []
+        }
+
     all_relevant, all_evidence, summaries = [], [], []
     for idx, chunk in enumerate(chunk_list(apk_strings, size=chunk_size), start=1):
         logger.info(f"[strings] Analyzing chunk {idx} ({len(chunk)} items)")
@@ -459,6 +491,14 @@ def analyze_strings_with_chunking(apk_strings: List[str], logger, model, chunk_s
     }
 
 def analyze_permissions_with_chunking(apk_perms: List[str], logger, model, chunk_size=100):
+    apk_perms = normalize_tool_list(apk_perms, logger=logger, tool_name="get_permissions")
+    if not apk_perms:
+        return {
+            "summary": "",
+            "relevant_permissions": [],
+            "evidence": []
+        }
+
     all_relevant, all_evidence, summaries = [], [], []
     for idx, chunk in enumerate(chunk_list(apk_perms, size=chunk_size), start=1):
         logger.info(f"[perms] Analyzing chunk {idx} ({len(chunk)} items)")
@@ -484,6 +524,14 @@ def analyze_permissions_with_chunking(apk_perms: List[str], logger, model, chunk
     }
 
 def analyze_classes_with_chunking(apk_classes: dict, logger, model, chunk_size=1):
+    apk_classes = normalize_tool_dict(apk_classes, logger=logger, tool_name="get_interesting_classes")
+    if not apk_classes:
+        return {
+            "summary": "",
+            "relevant_classes": [],
+            "evidence": []
+        }
+
     all_relevant, all_evidence, summaries = [], [], []
     items = list(apk_classes.items())
     for idx, chunk in enumerate(chunk_list(items, size=chunk_size), start=1):
@@ -511,6 +559,7 @@ def analyze_classes_with_chunking(apk_classes: dict, logger, model, chunk_size=1
     }
 
 def analyze_methods_with_chunking(apk_methods: dict, logger, model, chunk_size=5):
+    apk_methods = normalize_tool_dict(apk_methods, logger=logger, tool_name="get_interesting_methods")
     if apk_methods:
         all_relevant, all_evidence, summaries = [], [], []
         items = list(apk_methods.items())

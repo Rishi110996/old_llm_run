@@ -573,8 +573,6 @@ class StateDB:
     def __init__(self, path: str):
         self.path = path
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        # Each worker thread should use its own connection.
-        # timeout helps when multiple threads commit concurrently.
         self.conn = sqlite3.connect(path, timeout=60)
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA busy_timeout=60000;")
@@ -918,6 +916,26 @@ class StateDB:
         )
         row = cur.fetchone()
         return bool(row[0]) if row is not None else False
+
+    def get_download_state(self, *, sha256: str) -> Optional[Dict[str, Any]]:
+        cur = self.conn.execute(
+            """
+            SELECT status, permanent_failure, fail_count, last_error, last_attempt_at_utc
+            FROM download_states
+            WHERE sha256 = ?;
+            """,
+            (sha256,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "status": str(row[0]),
+            "permanent_failure": bool(row[1]),
+            "fail_count": int(row[2] or 0),
+            "last_error": str(row[3] or ""),
+            "last_attempt_at_utc": str(row[4] or ""),
+        }
 
     def record_analysis_status(
         self,
@@ -1472,8 +1490,14 @@ def download_records(
                     continue
 
                 if db.is_permanent_download_failure(sha256=sha256):
+                    download_state = db.get_download_state(sha256=sha256)
+                    prior_reason = (
+                        download_state.get("last_error")
+                        if download_state and download_state.get("last_error")
+                        else "Previously marked as permanent download failure"
+                    )
                     permanent_failures.append(
-                        {"sha256": sha256, "reason": "Previously marked as permanent download failure"}
+                        {"sha256": sha256, "reason": prior_reason}
                     )
                     continue
 
@@ -1735,6 +1759,7 @@ def sync_analysis_state_into_db(
 
 def print_batch_summaries(
     *,
+    db: StateDB,
     report_root: str,
     only: str,
     selected_families: List[str],
@@ -1772,7 +1797,15 @@ def print_batch_summaries(
         analysis_failure_examples = read_analysis_failure_examples(report_dir)
         pending_downloads = len(payload.get("pending_downloads") or [])
         terminal_download_failures = int(payload.get("terminal_download_failure_count") or 0)
-        terminal_download_failure_examples = list(payload.get("terminal_download_failures") or [])[:10]
+        terminal_download_failure_examples = []
+        for row in list(payload.get("terminal_download_failures") or [])[:10]:
+            sha256 = str(row.get("sha256") or "")
+            enriched = dict(row)
+            if sha256:
+                download_state = db.get_download_state(sha256=sha256)
+                if download_state and download_state.get("last_error"):
+                    enriched["reason"] = download_state["last_error"]
+            terminal_download_failure_examples.append(enriched)
         record_count = len(payload.get("records") or [])
         status = str(payload.get("status") or "unknown")
 
@@ -2237,6 +2270,7 @@ def main() -> int:
                 str(analysis_cfg.get("report_dir") or os.path.join(str(ds_cfg["output_dir"]), "batch_reports")),
             )
         print_batch_summaries(
+            db=db,
             report_root=report_root,
             only=args.only,
             selected_families=selected_families,
