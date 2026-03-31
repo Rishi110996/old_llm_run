@@ -1658,6 +1658,36 @@ def read_analysis_rows(report_dir: str) -> List[dict]:
         conn.close()
 
 
+def read_analysis_failure_examples(report_dir: str, limit: int = 10) -> List[dict]:
+    db_path = os.path.join(report_dir, "analysis_state.sqlite")
+    if not os.path.isfile(db_path):
+        return []
+
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        cur = conn.execute(
+            """
+            SELECT sha256, apk_name, attempts, last_error
+            FROM analysis_samples
+            WHERE status = 'failed'
+            ORDER BY COALESCE(finished_at_utc, started_at_utc, '') DESC, apk_name ASC
+            LIMIT ?;
+            """,
+            (int(limit),),
+        )
+        return [
+            {
+                "sha256": str(row[0]),
+                "apk_name": str(row[1]),
+                "attempts": int(row[2] or 0),
+                "last_error": str(row[3] or ""),
+            }
+            for row in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
 def sync_analysis_state_into_db(
     *,
     db: StateDB,
@@ -1739,8 +1769,10 @@ def print_batch_summaries(
 
         report_dir = os.path.dirname(summary_path)
         analysis_counts = read_analysis_counts(report_dir)
+        analysis_failure_examples = read_analysis_failure_examples(report_dir)
         pending_downloads = len(payload.get("pending_downloads") or [])
         terminal_download_failures = int(payload.get("terminal_download_failure_count") or 0)
+        terminal_download_failure_examples = list(payload.get("terminal_download_failures") or [])[:10]
         record_count = len(payload.get("records") or [])
         status = str(payload.get("status") or "unknown")
 
@@ -1761,7 +1793,9 @@ def print_batch_summaries(
                     "records": record_count,
                     "pending_downloads": pending_downloads,
                     "terminal_download_failures": terminal_download_failures,
+                    "terminal_download_failure_examples": terminal_download_failure_examples,
                     "analysis_counts": analysis_counts,
+                    "analysis_failure_examples": analysis_failure_examples,
                     "report_dir": report_dir,
                     "samples_dir": payload.get("samples_dir"),
                 },
@@ -1816,10 +1850,25 @@ def process_batch_from_summary(
 
     payload["last_attempt_utc"] = dt.datetime.now(tz=dt.timezone.utc).isoformat()
 
+    actionable_records: List[dict] = []
+    skipped_terminal_analysis: List[str] = []
+    for rec in records:
+        sha256 = str(rec.get("sha256") or "")
+        if not sha256:
+            continue
+        if db.is_terminal_analysis_status(sha256=sha256):
+            skipped_terminal_analysis.append(sha256)
+            continue
+        actionable_records.append(rec)
+
+    payload["terminal_analysis_skipped_count"] = len(skipped_terminal_analysis)
+    if skipped_terminal_analysis:
+        payload["terminal_analysis_skipped_examples"] = skipped_terminal_analysis[:20]
+
     download_result = download_records(
         db=db,
         client=client,
-        records=records,
+        records=actionable_records,
         samples_dir=samples_dir,
         bucket_label=bucket_label,
         overwrite_existing=overwrite_existing,
@@ -1847,7 +1896,7 @@ def process_batch_from_summary(
     terminal_failed_sha256s = set(terminal_failures.keys())
     pending_downloads = [
         rec["sha256"]
-        for rec in records
+        for rec in actionable_records
         if rec.get("downloadable") is not False
         and rec["sha256"] not in local_apks
         and rec["sha256"] not in terminal_failed_sha256s
@@ -1862,7 +1911,8 @@ def process_batch_from_summary(
         f"[download-summary:{bucket_label}] downloaded={len(local_apks)} "
         f"new_or_reused_this_run={downloaded_now} permanent_failures_now={permanent_now} "
         f"transient_failures_now={transient_now} pending_retryable={len(pending_downloads)} "
-        f"terminal_failures_total={len(terminal_failed_sha256s)}"
+        f"terminal_failures_total={len(terminal_failed_sha256s)} "
+        f"already_analyzed_skipped={len(skipped_terminal_analysis)}"
     )
 
     if download_result.get("exhausted"):

@@ -863,7 +863,7 @@ def analyze_sample_with_state(
     existing = state_db.get(sha256)
     if existing and existing.get("status") in TERMINAL_SAMPLE_STATUSES:
         print(f"[skip] {apk_name} already marked {existing['status']}")
-        return str(existing["status"])
+        return "skipped"
 
     logger = setup_logger(log_path, apk_name)
     state_db.start_attempt(
