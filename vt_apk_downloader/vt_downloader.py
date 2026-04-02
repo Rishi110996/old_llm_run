@@ -982,6 +982,17 @@ class StateDB:
         status = self.get_analysis_status(sha256=sha256)
         return status in {"done", "corrupt"}
 
+    def clear_analysis_statuses(self, *, sha256s: List[str]) -> int:
+        if not sha256s:
+            return 0
+        placeholders = ",".join("?" for _ in sha256s)
+        cur = self.conn.execute(
+            f"DELETE FROM analysis_states WHERE sha256 IN ({placeholders});",
+            list(sha256s),
+        )
+        self.conn.commit()
+        return int(cur.rowcount if cur.rowcount != -1 else 0)
+
 
 def vt_intelligence_search(
     client: VTClient,
@@ -1712,12 +1723,163 @@ def read_analysis_failure_examples(report_dir: str, limit: int = 10) -> List[dic
         conn.close()
 
 
+def read_done_verdict_rows(report_dir: str) -> List[dict]:
+    db_path = os.path.join(report_dir, "analysis_state.sqlite")
+    if not os.path.isfile(db_path):
+        return []
+
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        cur = conn.execute(
+            """
+            SELECT sha256, apk_name, verdict_path, log_path
+            FROM analysis_samples
+            WHERE status = 'done'
+            ORDER BY apk_name ASC;
+            """
+        )
+        return [
+            {
+                "sha256": str(row[0]),
+                "apk_name": str(row[1]),
+                "verdict_path": str(row[2] or ""),
+                "log_path": str(row[3] or ""),
+            }
+            for row in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def load_json_file(path: str) -> Optional[dict]:
+    if not path or not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    return payload if isinstance(payload, dict) else None
+
+
+def verdict_is_clean(payload: Optional[dict]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    verdict = payload.get("verdict")
+    if not isinstance(verdict, dict):
+        return False
+    try:
+        clean = int(verdict.get("Clean") or 0)
+        malicious = int(verdict.get("Malicious") or 0)
+        suspicious = int(verdict.get("Suspicious") or 0)
+    except Exception:
+        return False
+    return clean == 1 and malicious == 0 and suspicious == 0
+
+
+def reset_analysis_rows_to_failed(report_dir: str, sha256s: List[str], reason: str) -> int:
+    if not sha256s:
+        return 0
+
+    db_path = os.path.join(report_dir, "analysis_state.sqlite")
+    if not os.path.isfile(db_path):
+        return 0
+
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        placeholders = ",".join("?" for _ in sha256s)
+        cur = conn.execute(
+            f"""
+            UPDATE analysis_samples
+            SET status = 'failed',
+                last_error = ?,
+                finished_at_utc = ?
+            WHERE sha256 IN ({placeholders});
+            """,
+            [reason, dt.datetime.now(tz=dt.timezone.utc).isoformat(), *sha256s],
+        )
+        conn.commit()
+        return int(cur.rowcount if cur.rowcount != -1 else 0)
+    finally:
+        conn.close()
+
+
+def mark_batch_for_resume(summary_path: str, *, payload: dict) -> None:
+    status = str(payload.get("status") or "")
+    if status in {"completed", "completed_no_downloads", "cleaned", "downloaded"}:
+        payload["status"] = "analysis_incomplete"
+        payload["requeue_requested_at_utc"] = dt.datetime.now(tz=dt.timezone.utc).isoformat()
+        payload.pop("cleaned_at_utc", None)
+    write_batch_summary(summary_path, payload)
+
+
+def requeue_clean_verdicts(
+    *,
+    db: StateDB,
+    report_root: str,
+    only: str,
+    selected_families: List[str],
+    reason: str,
+    run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    summaries = batch_summary_paths(report_root)
+    affected_batches = 0
+    requeued = 0
+    central_cleared = 0
+    examples: List[dict] = []
+
+    for summary_path in summaries:
+        payload = read_batch_summary(summary_path)
+        if not batch_matches_selection(
+            payload,
+            only=only,
+            selected_families=selected_families,
+            run_id=run_id,
+        ):
+            continue
+
+        report_dir = os.path.dirname(summary_path)
+        clean_rows: List[dict] = []
+        for row in read_done_verdict_rows(report_dir):
+            verdict_payload = load_json_file(row.get("verdict_path") or "")
+            if verdict_is_clean(verdict_payload):
+                clean_rows.append(row)
+
+        if not clean_rows:
+            continue
+
+        sha256s = [row["sha256"] for row in clean_rows]
+        reset_count = reset_analysis_rows_to_failed(report_dir, sha256s, reason)
+        cleared_count = db.clear_analysis_statuses(sha256s=sha256s)
+        mark_batch_for_resume(summary_path, payload=payload)
+
+        affected_batches += 1
+        requeued += reset_count
+        central_cleared += cleared_count
+        for row in clean_rows[:10 - len(examples)]:
+            examples.append(
+                {
+                    "sha256": row["sha256"],
+                    "apk_name": row["apk_name"],
+                    "report_dir": report_dir,
+                }
+            )
+            if len(examples) >= 10:
+                break
+
+    return {
+        "affected_batches": affected_batches,
+        "requeued_clean_verdicts": requeued,
+        "central_status_rows_cleared": central_cleared,
+        "examples": examples,
+        "reason": reason,
+    }
+
+
 def sync_analysis_state_into_db(
     *,
     db: StateDB,
     report_root: str,
     only: str,
     selected_families: List[str],
+    run_id: Optional[str] = None,
 ) -> Dict[str, int]:
     summaries = batch_summary_paths(report_root)
     imported = 0
@@ -1730,6 +1892,7 @@ def sync_analysis_state_into_db(
             payload,
             only=only,
             selected_families=selected_families,
+            run_id=run_id,
         ):
             continue
 
@@ -1763,6 +1926,7 @@ def print_batch_summaries(
     report_root: str,
     only: str,
     selected_families: List[str],
+    run_id: Optional[str] = None,
 ) -> None:
     summaries = batch_summary_paths(report_root)
     selected_family_set = set(selected_families)
@@ -1788,6 +1952,8 @@ def print_batch_summaries(
         family = payload.get("family")
 
         if only != "all" and category != only:
+            continue
+        if run_id and str(payload.get("run_id") or "") != run_id:
             continue
         if category == "malicious" and selected_family_set and family not in selected_family_set:
             continue
@@ -1844,11 +2010,14 @@ def batch_matches_selection(
     *,
     only: str,
     selected_families: List[str],
+    run_id: Optional[str] = None,
 ) -> bool:
     category = str(payload.get("category") or "")
     family = payload.get("family")
 
     if only != "all" and category != only:
+        return False
+    if run_id and str(payload.get("run_id") or "") != run_id:
         return False
     if (
         category == "malicious"
@@ -2060,6 +2229,11 @@ def main() -> int:
         help="Restrict malicious collection to these family names for this run.",
     )
     ap.add_argument(
+        "--run-id",
+        default=None,
+        help="Restrict summary/requeue operations to a specific batch run_id.",
+    )
+    ap.add_argument(
         "--batch-size",
         type=int,
         default=None,
@@ -2084,6 +2258,11 @@ def main() -> int:
         "--summary-only",
         action="store_true",
         help="Print batch/download/analysis status from existing batch manifests, then exit.",
+    )
+    ap.add_argument(
+        "--requeue-clean-verdicts",
+        action="store_true",
+        help="Reset previously completed Clean verdicts in matching batches so they will be downloaded/analyzed again.",
     )
     ap.add_argument(
         "--debug-keys",
@@ -2256,6 +2435,7 @@ def main() -> int:
             report_root=report_root,
             only=args.only,
             selected_families=selected_families,
+            run_id=args.run_id,
         )
         if sync_counts["imported"] > 0:
             print(
@@ -2274,7 +2454,26 @@ def main() -> int:
             report_root=report_root,
             only=args.only,
             selected_families=selected_families,
+            run_id=args.run_id,
         )
+        db.close()
+        return 0
+
+    if args.requeue_clean_verdicts:
+        if report_root is None:
+            report_root = resolve_path(
+                base_dir,
+                str(analysis_cfg.get("report_dir") or os.path.join(str(ds_cfg["output_dir"]), "batch_reports")),
+            )
+        result = requeue_clean_verdicts(
+            db=db,
+            report_root=report_root,
+            only=args.only,
+            selected_families=selected_families,
+            reason="Requeued clean verdict after invalid or unavailable LLM response",
+            run_id=args.run_id,
+        )
+        print(json.dumps(result, ensure_ascii=False))
         db.close()
         return 0
 
@@ -2343,6 +2542,7 @@ def main() -> int:
                 payload,
                 only=args.only,
                 selected_families=selected_families,
+                run_id=args.run_id,
             ):
                 continue
             if payload.get("status") in {"completed", "completed_no_downloads", "cleaned", "downloaded"}:
