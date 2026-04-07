@@ -87,6 +87,21 @@ TERMINAL_SAMPLE_STATUSES = {"done", "corrupt"}
 RETRYABLE_SAMPLE_STATUSES = {"failed", "in_progress"}
 
 
+def is_terminal_corrupt_error(error: Exception) -> bool:
+    message = str(error or "").lower()
+    terminal_markers = (
+        "is encrypted, password required for extraction",
+        "password required for extraction",
+        "bad crc-32",
+        "bad crc",
+        "file is not a zip file",
+        "bad zip file",
+        "error -3 while decompressing",
+        "end-of-central-directory signature not found",
+    )
+    return any(marker in message for marker in terminal_markers)
+
+
 class AnalysisStateDB:
     def __init__(self, path: str):
         self.path = path
@@ -960,6 +975,19 @@ def analyze_sample_with_state(
 
     except Exception as e:
         logger.exception(f"Analysis failed for {apk_name}: {e}")
+        if is_terminal_corrupt_error(e):
+            payload = {
+                "apk_file": os.path.basename(apk_path),
+                "sha256": sha256,
+                "status": "corrupt",
+                "error": str(e),
+            }
+            write_json(verdict_path, payload)
+            master_log.write(f"{apk_name}: {json.dumps(payload, ensure_ascii=False)}\n")
+            master_log.flush()
+            state_db.finish(sha256=sha256, status="corrupt", last_error=str(e))
+            return "corrupt"
+
         state_db.finish(sha256=sha256, status="failed", last_error=str(e))
         return "failed"
     finally:
