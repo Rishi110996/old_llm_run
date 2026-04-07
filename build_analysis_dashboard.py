@@ -322,7 +322,7 @@ def build_metrics(entries: Iterable[MasterEntry], duplicate_counts: Dict[str, in
                 "family": family,
                 **counts,
                 "strict_tp_pct": percentage(counts["malicious"], counts["total"]),
-                "detection_pct": percentage(counts["malicious"] + counts["suspicious"], counts["total"]),
+                "non_strict_tp_pct": percentage(counts["malicious"] + counts["suspicious"], counts["total"]),
             }
         )
 
@@ -356,7 +356,7 @@ def build_metrics(entries: Iterable[MasterEntry], duplicate_counts: Dict[str, in
         },
         "performance": {
             "strict_tp_ratio": percentage(strict_tp, len(malicious_entries)),
-            "detection_ratio": percentage(strict_tp + suspicious_on_malicious, len(malicious_entries)),
+            "non_strict_tp_ratio": percentage(strict_tp + suspicious_on_malicious, len(malicious_entries)),
             "false_negative_ratio": percentage(false_negative, len(malicious_entries)),
             "fp_ratio": percentage(false_positive, len(benign_entries)),
             "tn_ratio": percentage(true_negative, len(benign_entries)),
@@ -443,12 +443,12 @@ def render_family_table(rows: List[Dict[str, Any]]) -> str:
             f"<td>{row['suspicious']}</td>"
             f"<td>{row['clean']}</td>"
             f"<td>{fmt_pct(row['strict_tp_pct'])}</td>"
-            f"<td>{fmt_pct(row['detection_pct'])}</td>"
+            f"<td>{fmt_pct(row['non_strict_tp_pct'])}</td>"
             "</tr>"
         )
     return (
         "<table>"
-        "<thead><tr><th>Family</th><th>Total</th><th>Malicious</th><th>Suspicious</th><th>Clean</th><th>Strict TP %</th><th>Detected %</th></tr></thead>"
+        "<thead><tr><th>Family</th><th>Total</th><th>Malicious</th><th>Suspicious</th><th>Clean</th><th>Strict TP %</th><th>Non strict TP %</th></tr></thead>"
         f"<tbody>{''.join(body)}</tbody>"
         "</table>"
     )
@@ -483,6 +483,7 @@ def build_dashboard_html(metrics: Dict[str, Any], output_dir: Path) -> str:
         [
             render_metric_card("Unique Samples", overview["total_unique_samples"]),
             render_metric_card("Strict TP Ratio", fmt_pct(performance["strict_tp_ratio"]), "Malicious ground-truth predicted Malicious"),
+            render_metric_card("Non strict TP Ratio", fmt_pct(performance["non_strict_tp_ratio"]), "Malicious ground-truth predicted Malicious or Suspicious"),
             render_metric_card("FP Ratio", fmt_pct(performance["fp_ratio"]), "Benign ground-truth predicted Malicious/Suspicious"),
             render_metric_card("Predicted Malicious", predicted["malicious"]),
             render_metric_card("Predicted Suspicious", predicted["suspicious"]),
