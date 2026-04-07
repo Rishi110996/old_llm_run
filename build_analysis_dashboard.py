@@ -266,6 +266,10 @@ def aggregate_entries(
     return latest_by_sha, dict(occurrence_count), raw_occurrences
 
 
+def filter_countable_entries(entries: Iterable[MasterEntry]) -> List[MasterEntry]:
+    return [entry for entry in entries if entry.verdict_label != "corrupt"]
+
+
 def percentage(numerator: int, denominator: int) -> Optional[float]:
     if denominator <= 0:
         return None
@@ -283,7 +287,6 @@ def family_display(entry: MasterEntry) -> str:
 def build_metrics(entries: Iterable[MasterEntry], duplicate_counts: Dict[str, int], log_count: int) -> Dict[str, Any]:
     entries = list(entries)
     predicted_counts = Counter(entry.verdict_label for entry in entries)
-    category_counts = Counter(entry.category for entry in entries)
 
     malicious_entries = [entry for entry in entries if entry.category == "malicious"]
     benign_entries = [entry for entry in entries if entry.category == "benign"]
@@ -292,20 +295,17 @@ def build_metrics(entries: Iterable[MasterEntry], duplicate_counts: Dict[str, in
     strict_tp = sum(1 for entry in malicious_entries if entry.verdict_label == "malicious")
     suspicious_on_malicious = sum(1 for entry in malicious_entries if entry.verdict_label == "suspicious")
     false_negative = sum(1 for entry in malicious_entries if entry.verdict_label == "clean")
-    corrupt_malicious = sum(1 for entry in malicious_entries if entry.verdict_label == "corrupt")
 
     true_negative = sum(1 for entry in benign_entries if entry.verdict_label == "clean")
     false_positive = sum(
         1 for entry in benign_entries if entry.verdict_label in {"malicious", "suspicious"}
     )
-    corrupt_benign = sum(1 for entry in benign_entries if entry.verdict_label == "corrupt")
 
     per_family: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
         "total": 0,
         "malicious": 0,
         "suspicious": 0,
         "clean": 0,
-        "corrupt": 0,
         "unknown": 0,
     })
     for entry in entries:
@@ -352,7 +352,6 @@ def build_metrics(entries: Iterable[MasterEntry], duplicate_counts: Dict[str, in
             "malicious": predicted_counts.get("malicious", 0),
             "suspicious": predicted_counts.get("suspicious", 0),
             "clean": predicted_counts.get("clean", 0),
-            "corrupt": predicted_counts.get("corrupt", 0),
             "unknown": predicted_counts.get("unknown", 0),
         },
         "performance": {
@@ -364,10 +363,8 @@ def build_metrics(entries: Iterable[MasterEntry], duplicate_counts: Dict[str, in
             "strict_tp": strict_tp,
             "suspicious_on_malicious": suspicious_on_malicious,
             "false_negative": false_negative,
-            "corrupt_malicious": corrupt_malicious,
             "false_positive": false_positive,
             "true_negative": true_negative,
-            "corrupt_benign": corrupt_benign,
         },
         "per_family": family_rows,
         "per_run": per_run,
@@ -445,14 +442,13 @@ def render_family_table(rows: List[Dict[str, Any]]) -> str:
             f"<td>{row['malicious']}</td>"
             f"<td>{row['suspicious']}</td>"
             f"<td>{row['clean']}</td>"
-            f"<td>{row['corrupt']}</td>"
             f"<td>{fmt_pct(row['strict_tp_pct'])}</td>"
             f"<td>{fmt_pct(row['detection_pct'])}</td>"
             "</tr>"
         )
     return (
         "<table>"
-        "<thead><tr><th>Family</th><th>Total</th><th>Malicious</th><th>Suspicious</th><th>Clean</th><th>Corrupt</th><th>Strict TP %</th><th>Detected %</th></tr></thead>"
+        "<thead><tr><th>Family</th><th>Total</th><th>Malicious</th><th>Suspicious</th><th>Clean</th><th>Strict TP %</th><th>Detected %</th></tr></thead>"
         f"<tbody>{''.join(body)}</tbody>"
         "</table>"
     )
@@ -468,12 +464,11 @@ def render_run_table(rows: List[Dict[str, Any]]) -> str:
             f"<td>{row.get('malicious', 0)}</td>"
             f"<td>{row.get('suspicious', 0)}</td>"
             f"<td>{row.get('clean', 0)}</td>"
-            f"<td>{row.get('corrupt', 0)}</td>"
             "</tr>"
         )
     return (
         "<table>"
-        "<thead><tr><th>Run ID</th><th>Unique Final Samples</th><th>Malicious</th><th>Suspicious</th><th>Clean</th><th>Corrupt</th></tr></thead>"
+        "<thead><tr><th>Run ID</th><th>Unique Final Samples</th><th>Malicious</th><th>Suspicious</th><th>Clean</th></tr></thead>"
         f"<tbody>{''.join(body)}</tbody>"
         "</table>"
     )
@@ -486,14 +481,13 @@ def build_dashboard_html(metrics: Dict[str, Any], output_dir: Path) -> str:
 
     metric_cards = "".join(
         [
-            render_metric_card("Unique Samples", overview["total_unique_samples"], "Bottom-most verdict per hash wins"),
-            render_metric_card("Total Overrides", overview["total_log_overrides"], "Older duplicate log entries ignored"),
+            render_metric_card("Unique Samples", overview["total_unique_samples"]),
             render_metric_card("Strict TP Ratio", fmt_pct(performance["strict_tp_ratio"]), "Malicious ground-truth predicted Malicious"),
             render_metric_card("FP Ratio", fmt_pct(performance["fp_ratio"]), "Benign ground-truth predicted Malicious/Suspicious"),
             render_metric_card("Predicted Malicious", predicted["malicious"]),
             render_metric_card("Predicted Suspicious", predicted["suspicious"]),
             render_metric_card("Predicted Clean", predicted["clean"]),
-            render_metric_card("Predicted Corrupt", predicted["corrupt"]),
+            render_metric_card("Families Covered", overview["families_covered"]),
         ]
     )
 
@@ -503,7 +497,6 @@ def build_dashboard_html(metrics: Dict[str, Any], output_dir: Path) -> str:
             render_bar("Malicious", predicted["malicious"], total, "#c0392b"),
             render_bar("Suspicious", predicted["suspicious"], total, "#d68910"),
             render_bar("Clean", predicted["clean"], total, "#1e8449"),
-            render_bar("Corrupt", predicted["corrupt"], total, "#566573"),
         ]
     )
 
@@ -581,7 +574,7 @@ def build_dashboard_html(metrics: Dict[str, Any], output_dir: Path) -> str:
       <div class=\"hero-panel\">
         <div class=\"eyebrow\">Static Aggregation Dashboard</div>
         <h1>APK Verdict Overview</h1>
-        <p>This dashboard aggregates every <strong>master_summary.log</strong> under the analysis report root, keeps only the <strong>latest occurrence per SHA256</strong>, and enriches each sample with family/category data from the central dataset state.</p>
+        <p>This dashboard aggregates every <strong>master_summary.log</strong> under the analysis report root and enriches each sample with family/category data from the central dataset state.</p>
         <p class=\"footer\">Output files are written under {html.escape(str(output_dir))}. Use the CSV/JSON exports there for downstream reporting.</p>
       </div>
       <div class=\"panel\">
@@ -640,7 +633,7 @@ def main() -> int:
         families_by_sha=families_by_sha,
         category_by_sha=category_by_sha,
     )
-    latest_entries = sorted(latest_by_sha.values(), key=lambda entry: entry.sha256)
+    latest_entries = sorted(filter_countable_entries(latest_by_sha.values()), key=lambda entry: entry.sha256)
     metrics = build_metrics(latest_entries, duplicate_counts, len(logs))
 
     out_dir = Path(args.output_dir).resolve()
