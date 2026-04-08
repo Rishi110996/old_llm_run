@@ -72,7 +72,9 @@ dataset:
     enabled: true
     download_dir: "/mnt/ext_storage/vt_apk_samples"
     overwrite_existing: false
-    selected_families: []  # empty means use all configured malicious families
+    selected_families: []  # strict allowlist; empty means use all configured malicious families
+    preferred_families: []  # soft priority for mixed malicious batches
+    excluded_families: []  # always exclude these families from planning/resume
     max_batch_total_bytes: 53687091200  # 50 GB
 
   # Hard constraints

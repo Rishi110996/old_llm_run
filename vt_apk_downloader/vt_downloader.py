@@ -1394,6 +1394,7 @@ def plan_weighted_family_batch(
     *,
     db: StateDB,
     families: List[str],
+    preferred_families: List[str],
     assigned_sha256s: set[str],
     remaining_target: int,
     max_batch_total_bytes: int,
@@ -1401,6 +1402,9 @@ def plan_weighted_family_batch(
 ) -> List[dict]:
     family_rows = db.get_family_candidate_rows(category="malicious", families=families)
     queues: Dict[str, List[dict]] = {fam: [] for fam in families}
+    preferred_family_set = set(preferred_families)
+    family_weights = {fam: (3 if fam in preferred_family_set else 1) for fam in families}
+    current_weights: Dict[str, int] = {fam: 0 for fam in families}
     for row in family_rows:
         if row["sha256"] in assigned_sha256s:
             continue
@@ -1436,7 +1440,20 @@ def plan_weighted_family_batch(
         if not active_families:
             break
 
-        fam = max(active_families, key=lambda item: item[1])[0]
+        active_family_names = [fam for fam, _remaining in active_families]
+        active_total_weight = sum(family_weights[fam] for fam in active_family_names)
+        for fam in active_family_names:
+            current_weights[fam] += family_weights[fam]
+
+        fam = max(
+            active_families,
+            key=lambda item: (
+                current_weights[item[0]],
+                item[1],
+                1 if item[0] in preferred_family_set else 0,
+            ),
+        )[0]
+        current_weights[fam] -= active_total_weight
         rows = queues[fam]
         idx = pointers[fam]
         picked = None
@@ -1816,6 +1833,7 @@ def requeue_clean_verdicts(
     report_root: str,
     only: str,
     selected_families: List[str],
+    excluded_families: List[str],
     reason: str,
     run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -1831,6 +1849,7 @@ def requeue_clean_verdicts(
             payload,
             only=only,
             selected_families=selected_families,
+            excluded_families=excluded_families,
             run_id=run_id,
         ):
             continue
@@ -1879,6 +1898,7 @@ def sync_analysis_state_into_db(
     report_root: str,
     only: str,
     selected_families: List[str],
+    excluded_families: List[str],
     run_id: Optional[str] = None,
 ) -> Dict[str, int]:
     summaries = batch_summary_paths(report_root)
@@ -1892,6 +1912,7 @@ def sync_analysis_state_into_db(
             payload,
             only=only,
             selected_families=selected_families,
+            excluded_families=excluded_families,
             run_id=run_id,
         ):
             continue
@@ -1926,10 +1947,12 @@ def print_batch_summaries(
     report_root: str,
     only: str,
     selected_families: List[str],
+    excluded_families: List[str],
     run_id: Optional[str] = None,
 ) -> None:
     summaries = batch_summary_paths(report_root)
     selected_family_set = set(selected_families)
+    excluded_family_set = set(excluded_families)
 
     if not summaries:
         print(f"[summary] No batch_summary.json files found under {report_root}")
@@ -1954,6 +1977,8 @@ def print_batch_summaries(
         if only != "all" and category != only:
             continue
         if run_id and str(payload.get("run_id") or "") != run_id:
+            continue
+        if category == "malicious" and family in excluded_family_set:
             continue
         if category == "malicious" and selected_family_set and family not in selected_family_set:
             continue
@@ -2010,14 +2035,18 @@ def batch_matches_selection(
     *,
     only: str,
     selected_families: List[str],
+    excluded_families: List[str],
     run_id: Optional[str] = None,
 ) -> bool:
     category = str(payload.get("category") or "")
     family = payload.get("family")
+    excluded_family_set = set(excluded_families)
 
     if only != "all" and category != only:
         return False
     if run_id and str(payload.get("run_id") or "") != run_id:
+        return False
+    if category == "malicious" and family in excluded_family_set:
         return False
     if (
         category == "malicious"
@@ -2029,11 +2058,66 @@ def batch_matches_selection(
     return True
 
 
+def filter_records_by_selected_families(
+    *,
+    category: str,
+    batch_family: Optional[str],
+    records: List[dict],
+    selected_families: List[str],
+    excluded_families: List[str],
+) -> Tuple[List[dict], List[dict]]:
+    if category != "malicious":
+        return list(records), []
+
+    selected_set = set(selected_families)
+    excluded_set = set(excluded_families)
+    kept: List[dict] = []
+    pruned: List[dict] = []
+    for rec in records:
+        rec_family = rec.get("family") or batch_family
+        if rec_family in excluded_set:
+            pruned.append(rec)
+            continue
+        if selected_set and rec_family not in selected_set:
+            pruned.append(rec)
+            continue
+        kept.append(rec)
+    return kept, pruned
+
+
+def remove_sample_artifacts(samples_dir: str, sha256s: List[str]) -> Dict[str, int]:
+    removed_apks = 0
+    removed_bins = 0
+
+    for sha256 in sha256s:
+        apk_filename = f"{sha256}.apk"
+        apk_path = os.path.join(samples_dir, apk_filename)
+        bin_dir = os.path.join(samples_dir, f"bin_{apk_filename}")
+
+        if os.path.isfile(apk_path):
+            try:
+                os.remove(apk_path)
+                removed_apks += 1
+            except OSError:
+                pass
+
+        if os.path.isdir(bin_dir):
+            try:
+                shutil.rmtree(bin_dir)
+                removed_bins += 1
+            except OSError:
+                pass
+
+    return {"removed_apks": removed_apks, "removed_bins": removed_bins}
+
+
 def process_batch_from_summary(
     *,
     db: StateDB,
     client: VTClient,
     summary_path: str,
+    selected_families: List[str],
+    excluded_families: List[str],
     overwrite_existing: bool,
     show_progress: bool,
     analyze_enabled: bool,
@@ -2051,6 +2135,40 @@ def process_batch_from_summary(
     bucket_label = f"{category}:{family or 'all'}"
 
     payload["last_attempt_utc"] = dt.datetime.now(tz=dt.timezone.utc).isoformat()
+
+    records, pruned_records = filter_records_by_selected_families(
+        category=category,
+        batch_family=family,
+        records=records,
+        selected_families=selected_families,
+        excluded_families=excluded_families,
+    )
+    if pruned_records:
+        pruned_sha256s = [str(rec.get("sha256")) for rec in pruned_records if rec.get("sha256")]
+        payload["records"] = records
+        payload["selected_families_applied"] = list(selected_families)
+        payload["excluded_families_applied"] = list(excluded_families)
+        payload["pruned_record_count"] = len(pruned_records)
+        payload["pruned_record_examples"] = pruned_sha256s[:20]
+        payload["terminal_download_failures"] = [
+            row for row in (payload.get("terminal_download_failures") or [])
+            if row.get("sha256") not in set(pruned_sha256s)
+        ]
+        payload["pending_downloads"] = [
+            sha for sha in (payload.get("pending_downloads") or [])
+            if sha not in set(pruned_sha256s)
+        ]
+        payload["pruned_local_artifacts"] = remove_sample_artifacts(samples_dir, pruned_sha256s)
+        write_batch_summary(summary_path, payload)
+        constraint_parts: List[str] = []
+        if selected_families:
+            constraint_parts.append(f"selected={', '.join(selected_families)}")
+        if excluded_families:
+            constraint_parts.append(f"excluded={', '.join(excluded_families)}")
+        constraint_text = " ".join(constraint_parts) if constraint_parts else "current family constraints"
+        print(
+            f"[batch:{bucket_label}] pruned {len(pruned_records)} record(s) to satisfy {constraint_text}"
+        )
 
     actionable_records: List[dict] = []
     skipped_terminal_analysis: List[str] = []
@@ -2089,10 +2207,12 @@ def process_batch_from_summary(
             terminal_failures[str(sha256)] = row
     payload["terminal_download_failures"] = list(terminal_failures.values())
 
+    allowed_sha256s = {str(rec.get("sha256")) for rec in records if rec.get("sha256")}
     local_apks = {
         os.path.splitext(name)[0]
         for name in os.listdir(samples_dir)
         if name.lower().endswith(".apk") and has_apk_magic(os.path.join(samples_dir, name))
+        and os.path.splitext(name)[0] in allowed_sha256s
     } if os.path.isdir(samples_dir) else set()
 
     terminal_failed_sha256s = set(terminal_failures.keys())
@@ -2226,7 +2346,19 @@ def main() -> int:
         "--families",
         nargs="+",
         default=None,
-        help="Restrict malicious collection to these family names for this run.",
+        help="Restrict malicious collection to these family names for this run."
+    )
+    ap.add_argument(
+        "--prefer-families",
+        nargs="+",
+        default=None,
+        help="Prefer these malicious families when planning mixed batches, without excluding others."
+    )
+    ap.add_argument(
+        "--exclude-families",
+        nargs="+",
+        default=None,
+        help="Exclude these malicious families entirely for this run."
     )
     ap.add_argument(
         "--run-id",
@@ -2426,8 +2558,17 @@ def main() -> int:
         show_progress = False
 
     selected_families_cfg = download_cfg.get("selected_families") or []
+    preferred_families_cfg = download_cfg.get("preferred_families") or []
+    excluded_families_cfg = download_cfg.get("excluded_families") or []
     selected_families = list(args.families) if args.families else list(selected_families_cfg)
+    preferred_families = (
+        list(args.prefer_families) if args.prefer_families else list(preferred_families_cfg)
+    )
+    excluded_families = (
+        list(args.exclude_families) if args.exclude_families else list(excluded_families_cfg)
+    )
     selected_family_set = set(selected_families)
+    excluded_family_set = set(excluded_families)
 
     if report_root and os.path.isdir(report_root):
         sync_counts = sync_analysis_state_into_db(
@@ -2435,6 +2576,7 @@ def main() -> int:
             report_root=report_root,
             only=args.only,
             selected_families=selected_families,
+            excluded_families=excluded_families,
             run_id=args.run_id,
         )
         if sync_counts["imported"] > 0:
@@ -2454,6 +2596,7 @@ def main() -> int:
             report_root=report_root,
             only=args.only,
             selected_families=selected_families,
+            excluded_families=excluded_families,
             run_id=args.run_id,
         )
         db.close()
@@ -2470,6 +2613,7 @@ def main() -> int:
             report_root=report_root,
             only=args.only,
             selected_families=selected_families,
+            excluded_families=excluded_families,
             reason="Requeued clean verdict after invalid or unavailable LLM response",
             run_id=args.run_id,
         )
@@ -2522,6 +2666,8 @@ def main() -> int:
             db=db,
             client=client,
             summary_path=summary_path,
+            selected_families=selected_families,
+            excluded_families=excluded_families,
             overwrite_existing=overwrite_existing,
             show_progress=show_progress,
             analyze_enabled=analyze_enabled,
@@ -2542,6 +2688,7 @@ def main() -> int:
                 payload,
                 only=args.only,
                 selected_families=selected_families,
+                excluded_families=excluded_families,
                 run_id=args.run_id,
             ):
                 continue
@@ -2558,6 +2705,8 @@ def main() -> int:
                 db=db,
                 client=client,
                 summary_path=summary_path,
+                selected_families=selected_families,
+                excluded_families=excluded_families,
                 overwrite_existing=overwrite_existing,
                 show_progress=show_progress,
                 analyze_enabled=analyze_enabled,
@@ -2587,9 +2736,27 @@ def main() -> int:
                     raise SystemExit(
                         f"Unknown family/families in selection: {', '.join(unknown_families)}"
                     )
-                families = [fam for fam in all_families if fam in selected_family_set]
+                families = [
+                    fam for fam in all_families if fam in selected_family_set and fam not in excluded_family_set
+                ]
             else:
-                families = all_families
+                families = [fam for fam in all_families if fam not in excluded_family_set]
+
+            unknown_preferred = [fam for fam in preferred_families if fam not in all_families]
+            if unknown_preferred:
+                raise SystemExit(
+                    f"Unknown family/families in preferred list: {', '.join(unknown_preferred)}"
+                )
+
+            unknown_excluded = [fam for fam in excluded_families if fam not in all_families]
+            if unknown_excluded:
+                raise SystemExit(
+                    f"Unknown family/families in excluded list: {', '.join(unknown_excluded)}"
+                )
+
+            preferred_families = [
+                fam for fam in preferred_families if fam in families and fam not in excluded_family_set
+            ]
 
             min_pos = int(mal_cfg["min_malicious_vendors"])
             templ = str(search_cfg["malicious_template"])
@@ -2634,6 +2801,7 @@ def main() -> int:
                     planned_records = plan_weighted_family_batch(
                         db=db,
                         families=families,
+                        preferred_families=preferred_families,
                         assigned_sha256s=assigned_sha256s,
                         remaining_target=remaining_target,
                         max_batch_total_bytes=max_batch_total_bytes,
