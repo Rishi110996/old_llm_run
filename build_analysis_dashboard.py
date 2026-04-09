@@ -46,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         default="dashboard_output",
         help="Directory where the dashboard HTML, JSON, and CSV outputs will be written.",
     )
+    parser.add_argument(
+        "--master-log-name",
+        default="master_summary.log",
+        help="Master summary filename to aggregate. Defaults to master_summary.log",
+    )
     return parser.parse_args()
 
 
@@ -67,8 +72,8 @@ def load_config(config_path: Path) -> Tuple[Dict[str, Any], Path, Path, Path]:
     return cfg, report_root, state_db, output_dir
 
 
-def discover_master_logs(report_root: Path) -> List[Path]:
-    logs = sorted(report_root.rglob("master_summary.log"))
+def discover_master_logs(report_root: Path, master_log_name: str) -> List[Path]:
+    logs = sorted(report_root.rglob(master_log_name))
     return sorted(logs, key=lambda path: extract_sort_key(report_root, path))
 
 
@@ -474,7 +479,7 @@ def render_run_table(rows: List[Dict[str, Any]]) -> str:
     )
 
 
-def build_dashboard_html(metrics: Dict[str, Any], output_dir: Path) -> str:
+def build_dashboard_html(metrics: Dict[str, Any], output_dir: Path, master_log_name: str) -> str:
     overview = metrics["overview"]
     predicted = metrics["predicted_counts"]
     performance = metrics["performance"]
@@ -575,7 +580,7 @@ def build_dashboard_html(metrics: Dict[str, Any], output_dir: Path) -> str:
       <div class=\"hero-panel\">
         <div class=\"eyebrow\">Static Aggregation Dashboard</div>
         <h1>APK Verdict Overview</h1>
-        <p>This dashboard aggregates every <strong>master_summary.log</strong> under the analysis report root and enriches each sample with family/category data from the central dataset state.</p>
+        <p>This dashboard aggregates every <strong>{html.escape(master_log_name)}</strong> under the analysis report root and enriches each sample with family/category data from the central dataset state.</p>
         <p class=\"footer\">Output files are written under {html.escape(str(output_dir))}. Use the CSV/JSON exports there for downstream reporting.</p>
       </div>
       <div class=\"panel\">
@@ -620,9 +625,9 @@ def main() -> int:
     config_path = Path(args.config).resolve()
     _, report_root, state_db, output_dir = load_config(config_path)
 
-    logs = discover_master_logs(report_root)
+    logs = discover_master_logs(report_root, args.master_log_name)
     if not logs:
-        raise SystemExit(f"No master_summary.log files found under {report_root}")
+        raise SystemExit(f"No {args.master_log_name} files found under {report_root}")
 
     state_mapping = load_state_family_mapping(state_db)
     output_mapping = load_output_family_mapping(output_dir)
@@ -644,6 +649,7 @@ def main() -> int:
         "report_root": str(report_root),
         "state_db": str(state_db),
         "output_dir": str(output_dir),
+        "master_log_name": args.master_log_name,
         "metrics": metrics,
         "latest_entries": [
             {
@@ -672,11 +678,15 @@ def main() -> int:
     export_latest_entries_csv(csv_path, latest_entries, duplicate_counts)
 
     html_path = out_dir / "analysis_dashboard.html"
-    html_path.write_text(build_dashboard_html(metrics, out_dir), encoding="utf-8")
+    html_path.write_text(
+        build_dashboard_html(metrics, out_dir, args.master_log_name),
+        encoding="utf-8",
+    )
 
     print(
         json.dumps(
             {
+                "master_log_name": args.master_log_name,
                 "master_log_files_scanned": len(logs),
                 "unique_samples": len(latest_entries),
                 "output_html": str(html_path),

@@ -61,10 +61,15 @@ def parse_args() -> argparse.Namespace:
         default=300,
         help="How often to regenerate the dashboard in seconds. Defaults to 300",
     )
+    parser.add_argument(
+        "--master-log-name",
+        default="master_summary.log",
+        help="Master summary filename to aggregate. Defaults to master_summary.log",
+    )
     return parser.parse_args()
 
 
-def build_dashboard(repo_root: Path, config_path: Path, output_dir: Path) -> None:
+def build_dashboard(repo_root: Path, config_path: Path, output_dir: Path, master_log_name: str) -> None:
     cmd = [
         sys.executable,
         str(repo_root / "build_analysis_dashboard.py"),
@@ -72,6 +77,8 @@ def build_dashboard(repo_root: Path, config_path: Path, output_dir: Path) -> Non
         str(config_path),
         "--output-dir",
         str(output_dir),
+        "--master-log-name",
+        master_log_name,
     ]
     print("[builder] running:", " ".join(cmd))
     result = subprocess.run(cmd, cwd=str(repo_root), capture_output=True, text=True)
@@ -89,11 +96,12 @@ def build_loop(
     repo_root: Path,
     config_path: Path,
     output_dir: Path,
+    master_log_name: str,
     refresh_seconds: int,
 ) -> None:
     while not stop_event.is_set():
         try:
-            build_dashboard(repo_root, config_path, output_dir)
+            build_dashboard(repo_root, config_path, output_dir, master_log_name)
             print(f"[builder] next refresh in {refresh_seconds}s")
         except Exception as exc:
             print(f"[builder] refresh failed: {exc}")
@@ -116,7 +124,7 @@ def main() -> int:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    build_dashboard(repo_root, config_path, output_dir)
+    build_dashboard(repo_root, config_path, output_dir, args.master_log_name)
 
     stop_event = threading.Event()
     builder_thread = threading.Thread(
@@ -126,6 +134,7 @@ def main() -> int:
             "repo_root": repo_root,
             "config_path": config_path,
             "output_dir": output_dir,
+            "master_log_name": args.master_log_name,
             "refresh_seconds": args.refresh_seconds,
         },
         daemon=True,
