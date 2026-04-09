@@ -2275,6 +2275,7 @@ def process_batch_from_summary(
             report_root=os.path.dirname(report_dir),
             only="all",
             selected_families=[],
+            excluded_families=excluded_families,
         )
         payload["analysis_state_sync"] = sync_counts
         if cleanup_completed_samples:

@@ -205,6 +205,10 @@ def utc_now_iso() -> str:
     return dt.datetime.now(tz=dt.timezone.utc).isoformat()
 
 
+class LLMUnavailableError(RuntimeError):
+    pass
+
+
 def compute_file_sha256(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as f:
@@ -272,6 +276,9 @@ def call_llm(messages, model, logger, max_retries=3):
             )
 
             content = response.choices[0].message.content
+            if content is None or not str(content).strip():
+                logger.error(f"LLM returned empty content on attempt {attempt}")
+                continue
 
             safe_log(logger, f"LLM Attempt {attempt} Raw: {content}")
 
@@ -289,7 +296,7 @@ def call_llm(messages, model, logger, max_retries=3):
             continue
 
     logger.error("LLM failed after retries.")
-    return None
+    raise LLMUnavailableError("LLM request failed after retries or returned no response")
 
 # # -------------------- LLM CALL --------------------
 # def call_llm(messages, model, logger, max_retries=3):
@@ -732,8 +739,60 @@ def consolidate_evidence(
     return consolidated
 
 
+def normalize_final_verdict(verdict: Any, logger) -> Optional[Dict[str, Any]]:
+    if not isinstance(verdict, dict):
+        logger.error("Final LLM verdict is not a JSON object")
+        return None
+
+    try:
+        malicious = int(verdict.get("Malicious"))
+        suspicious = int(verdict.get("Suspicious"))
+        clean = int(verdict.get("Clean"))
+    except Exception:
+        logger.error("Final LLM verdict is missing required Malicious/Suspicious/Clean flags")
+        return None
+
+    if (malicious + suspicious + clean) != 1:
+        logger.error(
+            "Final LLM verdict is not one-hot: %s",
+            json.dumps(verdict, ensure_ascii=False),
+        )
+        return None
+
+    normalized: Dict[str, Any] = {
+        "Malicious": malicious,
+        "Suspicious": suspicious,
+        "Clean": clean,
+    }
+
+    risk_score = verdict.get("Risk-Score")
+    if risk_score is not None:
+        try:
+            normalized["Risk-Score"] = max(0, min(100, int(risk_score)))
+        except Exception:
+            logger.warning("Final LLM verdict had invalid Risk-Score; dropping it")
+
+    summary = verdict.get("Summary")
+    if isinstance(summary, str) and summary.strip():
+        normalized["Summary"] = summary.strip()
+
+    iocs = verdict.get("IOCs")
+    if isinstance(iocs, list):
+        normalized["IOCs"] = [str(item) for item in iocs if str(item).strip()][:100]
+
+    return normalized
+
+
 # --- Final LLM Verdict ---
-def final_llm_verdict(apk_path, tool_results, preliminary, consolidated_evidence, logger):
+def final_llm_verdict(
+    apk_path,
+    tool_results,
+    preliminary_verdict,
+    preliminary_risk,
+    preliminary_iocs,
+    consolidated_evidence,
+    logger,
+):
     # # Step 1: consolidate evidence
     # raw_evidence = {
     #     "strings": tool_results.get("strings_analysis", {}).get("evidence", []),
@@ -744,7 +803,8 @@ def final_llm_verdict(apk_path, tool_results, preliminary, consolidated_evidence
     # Step 2: build user content
     user_content = {
         "apk_file": os.path.basename(apk_path),
-        "preliminary_verdict": preliminary,
+        "preliminary_verdict": preliminary_verdict,
+        "preliminary_risk_score": preliminary_risk,
         "tools_summary": {
             "apk_basic_info": tool_results.get("get_apk_basic_info", {}),
             "certs": tool_results.get("get_apk_certificates", {}),
@@ -754,7 +814,7 @@ def final_llm_verdict(apk_path, tool_results, preliminary, consolidated_evidence
             "yara_detections": tool_results.get("yara_detection", []),
         },
         "evidence": consolidated_evidence,
-        "iocs": preliminary.get("IOCs", [])
+        "iocs": preliminary_iocs,
     }
 
     # # Step 3: handle YARA hits
@@ -814,8 +874,11 @@ def final_llm_verdict(apk_path, tool_results, preliminary, consolidated_evidence
 
     # Step 5: log & call LLM
     safe_log(logger, json.dumps(user_content, indent=2, ensure_ascii=False))
-    verdict = call_llm(messages,"claude-4-sonnet", logger) or preliminary
-    return verdict
+    verdict = call_llm(messages, "claude-4-sonnet", logger)
+    normalized_verdict = normalize_final_verdict(verdict, logger)
+    if normalized_verdict is None:
+        raise RuntimeError("Final LLM verdict unavailable or invalid after retries")
+    return normalized_verdict
 
 
 # -------------------- PIPELINE --------------------
@@ -885,7 +948,9 @@ def analyze_apk_pipeline(apk_path, logger):
     verdict = final_llm_verdict(
         apk_path=apk_path,
         tool_results=updated_tools_result,
-        preliminary=prelim,
+        preliminary_verdict=prelim,
+        preliminary_risk=risk,
+        preliminary_iocs=iocs,
         consolidated_evidence=consolidated,
         logger=logger
     )
@@ -988,6 +1053,17 @@ def analyze_sample_with_state(
             state_db.finish(sha256=sha256, status="corrupt", last_error=str(e))
             return "corrupt"
 
+        if isinstance(e, LLMUnavailableError):
+            payload = {
+                "apk_file": os.path.basename(apk_path),
+                "sha256": sha256,
+                "status": "failed",
+                "error": str(e),
+            }
+            write_json(verdict_path, payload)
+            state_db.finish(sha256=sha256, status="failed", last_error=str(e))
+            return "halted_failed"
+
         state_db.finish(sha256=sha256, status="failed", last_error=str(e))
         return "failed"
     finally:
@@ -1038,6 +1114,10 @@ if __name__ == "__main__":
                 state_db=state_db,
                 master_log=master_log,
             )
+            if status == "halted_failed":
+                run_counts["failed"] += 1
+                print("[halt] stopping analysis run because LLM requests failed after retries")
+                break
             if status in run_counts:
                 run_counts[status] += 1
             else:
