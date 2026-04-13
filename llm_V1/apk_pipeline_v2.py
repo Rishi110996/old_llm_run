@@ -111,6 +111,123 @@ def _run_ssdeep(apk_path: str, logger: logging.Logger) -> List:
         return []
 
 
+def _check_multidex_and_assets(apk_path: str, logger: logging.Logger) -> List:
+    """Check for multi-DEX files and embedded DEX/APK/JAR payloads in APK assets."""
+    from evidence_schema import EvidenceItem, make_evidence_id
+    _PAYLOAD_EXTS = {".dex", ".apk", ".jar", ".odex"}
+    items: List = []
+    try:
+        apk = get_apk_context(apk_path).apk
+
+        # --- Multi-DEX: classes2.dex, classes3.dex, … ---
+        all_dex = list(apk.get_all_dex())
+        if len(all_dex) > 1:
+            items.append(EvidenceItem(
+                id=make_evidence_id("class", "multi_dex", "apk_structure"),
+                kind="class",
+                value=f"multi-DEX APK ({len(all_dex)} DEX files)",
+                source_location="apk_structure",
+                direction="ambiguous",
+                strength=0.65,
+                behavior_tags=["dynamic_code_loading", "anti_analysis"],
+                explanation=(
+                    f"APK contains {len(all_dex)} DEX files (classes.dex + classes2.dex…); "
+                    "common payload-hiding technique in droppers and banking trojans"
+                ),
+                benign_alternatives="Large apps exceeding the 64K method limit, multi-module build toolchains",
+            ))
+
+        # --- Embedded DEX/APK/JAR in assets or non-lib paths ---
+        for fname in apk.get_files():
+            fname_lower = fname.lower()
+            _, ext = os.path.splitext(fname_lower)
+            if ext not in _PAYLOAD_EXTS:
+                continue
+            # Skip the normal top-level DEX files and native libraries
+            if fname_lower.startswith("classes") and ext == ".dex":
+                continue
+            if fname_lower.startswith("lib/"):
+                continue
+            kind_label = (
+                "DEX bytecode payload" if ext == ".dex"
+                else "embedded APK" if ext == ".apk"
+                else "embedded JAR"
+            )
+            items.append(EvidenceItem(
+                id=make_evidence_id("class", f"asset:{fname}", "apk_structure"),
+                kind="class",
+                value=f"embedded {kind_label}: {fname}",
+                source_location="apk_structure",
+                direction="malicious",
+                strength=0.90,
+                behavior_tags=["dynamic_code_loading"],
+                explanation=(
+                    f"APK asset '{fname}' is an embedded {kind_label}; "
+                    "classic dropper / staged-payload delivery — secondary code is loaded and executed at runtime"
+                ),
+                benign_alternatives="Cordova/React-Native bundle assets, auto-update frameworks (rare; usually signed separately)",
+            ))
+    except Exception as exc:
+        logger.warning("[stage0] multi-DEX/asset check failed: %s", exc)
+    return items
+
+
+def _check_app_obfuscation_entropy(apk_path: str, logger: logging.Logger) -> List:
+    """Compute app-level class-name entropy as a DexGuard/Allatori obfuscation signal."""
+    from evidence_schema import EvidenceItem, make_evidence_id
+    items: List = []
+    try:
+        ctx = get_apk_context(apk_path)
+        analyzer = ctx.analyzer
+        total = 0
+        short = 0
+        for cls_obj in analyzer.analysis.get_classes():
+            cls_name = cls_obj.name
+            if cls_name.startswith(analyzer.SAFE_CLASSES):
+                continue
+            total += 1
+            leaf = cls_name.split("/")[-1].rstrip(";")
+            if len(leaf) <= 2:
+                short += 1
+        if total == 0:
+            return items
+        ratio = short / total
+        if ratio >= 0.70:
+            strength = round(min(0.90, 0.60 + ratio * 0.40), 2)
+            items.append(EvidenceItem(
+                id=make_evidence_id("class", "app_class_entropy", "apk_structure"),
+                kind="class",
+                value=f"heavy class-name obfuscation: {ratio:.0%} short names ({short}/{total} user classes)",
+                source_location="apk_structure",
+                direction="malicious",
+                strength=strength,
+                behavior_tags=["anti_analysis"],
+                explanation=(
+                    f"{ratio:.0%} of user-defined class names are ≤2 chars — "
+                    "signature of DexGuard/Allatori/commercial obfuscator used to hinder static analysis"
+                ),
+                benign_alternatives="Aggressive ProGuard minification in release builds can produce similar ratios",
+            ))
+        elif ratio >= 0.50:
+            items.append(EvidenceItem(
+                id=make_evidence_id("class", "app_class_entropy", "apk_structure"),
+                kind="class",
+                value=f"moderate class-name obfuscation: {ratio:.0%} short names ({short}/{total} user classes)",
+                source_location="apk_structure",
+                direction="ambiguous",
+                strength=0.55,
+                behavior_tags=["anti_analysis"],
+                explanation=(
+                    f"{ratio:.0%} of user-defined class names are ≤2 chars — "
+                    "moderate obfuscation consistent with ProGuard minification or commercial obfuscator"
+                ),
+                benign_alternatives="Production apps commonly use ProGuard; this alone is not malicious",
+            ))
+    except Exception as exc:
+        logger.warning("[stage0] class entropy check failed: %s", exc)
+    return items
+
+
 # ---------------------------------------------------------------------------
 # YARA → evidence items
 # ---------------------------------------------------------------------------
@@ -340,6 +457,16 @@ def run(
     ssdeep_items = _run_ssdeep(apk_path, logger)
     logger.info("[pipeline_v2] ssdeep: %d evidence item(s)", len(ssdeep_items))
 
+    # ── Stage 0c: multi-DEX / embedded asset detection ────────────────────
+    logger.info("[pipeline_v2] Stage 0c: multi-DEX / embedded asset detection")
+    multidex_items = _check_multidex_and_assets(apk_path, logger)
+    logger.info("[pipeline_v2] multi-DEX/asset: %d evidence item(s)", len(multidex_items))
+
+    # ── Stage 0d: app-level class-name entropy (obfuscation depth) ────────
+    logger.info("[pipeline_v2] Stage 0d: class-name entropy")
+    entropy_items = _check_app_obfuscation_entropy(apk_path, logger)
+    logger.info("[pipeline_v2] entropy: %d evidence item(s)", len(entropy_items))
+
     # ── Stage 1: evidence normalization ───────────────────────────────────
     logger.info("[pipeline_v2] Stage 1: normalization")
     evidence_items = normalize_all(apk_facts)
@@ -348,6 +475,11 @@ def run(
     evidence_items.extend(_yara_evidence_items(apk_facts.yara_matches))
     # Include ssdeep items
     evidence_items.extend(ssdeep_items)
+    # Include multi-DEX / embedded asset items
+    evidence_items.extend(multidex_items)
+    # Include app-level obfuscation entropy items
+    evidence_items.extend(entropy_items)
+
     logger.info("[pipeline_v2] %d evidence items after normalization", len(evidence_items))
 
     # ── Stage 1b/c (optional): sandbox enrichment ────────────────────────

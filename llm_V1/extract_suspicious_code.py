@@ -528,12 +528,26 @@ class APKAnalyzer:
                     tags.append("anti_analysis")
 
             # sensitive API calls (xref_to = classes this class references)
+            _has_reflection = False
+            _has_high_danger = False
             for xref_cls in class_obj.get_xref_to():
                 xref_name = xref_cls.name
+                # Track broad reflection use (Method, Field, Constructor, Proxy, ClassLoader)
+                if xref_name.startswith("Ljava/lang/reflect/") or xref_name == "Ljava/lang/ClassLoader;":
+                    _has_reflection = True
                 for api_prefix, (api_score, api_tags) in self.API_SCORES.items():
                     if xref_name.startswith(api_prefix):
+                        if api_score >= 0.80:
+                            _has_high_danger = True
                         score += api_score
                         tags.extend(api_tags)
+            # Reflection concealing a dangerous API in the same class = composite signal.
+            # Attacker uses reflect.Method.invoke() to call SmsManager/DexClassLoader/etc.
+            # without a visible direct reference — this pattern is rarely benign.
+            if _has_reflection and _has_high_danger:
+                score += 0.30
+                if "anti_analysis" not in tags:
+                    tags.append("anti_analysis")
 
             # suspicious strings in bytecode (const-string instructions)
             for method_obj in methods:

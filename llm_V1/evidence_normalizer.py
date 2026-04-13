@@ -341,6 +341,32 @@ _STRING_RULES: List[_StringRule] = [
         "Long hex string; may be a hardcoded RC4/AES key or command hash",
         "API keys, hash digests, Firebase sender IDs",
     ),
+    # ── Telegram Bot C2 dead-drop (Spymax, Spynote, modern Android RATs) ─────
+    _StringRule(
+        re.compile(r"https?://api\.telegram\.org/bot\d{7,12}:[A-Za-z0-9_-]{35}", re.I),
+        "malicious", 0.90, ["c2_networking"],
+        "Telegram Bot API token acting as C2 dead-drop; used extensively by Spymax, Spynote, AhMyth variants, and modern Android RATs",
+        "Legitimate Telegram bot SDK integration (extremely rare to hardcode token in production APK)",
+    ),
+    # ── Paste-site dead-drops (Anubis, Cerberus, BankBot) ────────────────────
+    _StringRule(
+        re.compile(r"pastebin\.com/raw/|paste\.ee/r/|hastebin\.com/raw/|rentry\.co/", re.I),
+        "malicious", 0.80, ["c2_networking"],
+        "Paste-site raw endpoint used as dead-drop C2 relay; changes C2 domain without updating APK to evade domain blocklists",
+        "Developer sharing configs via paste-sites (should not appear in a production APK)",
+    ),
+    # ── Hardcoded banking app package targets (overlay launch trigger) ────────
+    _StringRule(
+        re.compile(
+            r"com\.(?:chase|bankofamerica|wellsfargo|citibank|hsbc|barclays|"
+            r"natwest|santander|lloydsbank|ing(?:direct)?|bnpparibas|societegenerale|"
+            r"commerzbank|deutschebank|jpmorgan|usbank)\b",
+            re.I,
+        ),
+        "malicious", 0.85, ["overlay_fraud"],
+        "Hardcoded banking app package name; indicates overlay trojan maintaining a target list to know when to launch credential-phishing overlay",
+        "Banking apps that self-reference their own package for deep linking (self-referential, not cross-app)",
+    ),
 ]
 
 
@@ -471,14 +497,15 @@ _SINGLE_CHAR_ORG_PATTERN = re.compile(r'"[OC]"\s*:\s*"\w{1,2}"')
 # Known-malicious signing cert SHA-1 thumbprints (add as threat intel accumulates).
 # Sources: public threat intel reports, malware analysis blogs.
 _KNOWN_MALWARE_CERT_THUMBPRINTS: Dict[str, str] = {
-    # SpyNote / CypherRAT variants
+    # SpyNote / CypherRAT variants (SHA-1, from public campaign analysis)
     "6ae7b4b5cbee95be47ff22e62a4ef9af7534a9e0": "SpyNote/CypherRAT",
-    # Cerberus banking trojan campaign
-    "b3a2e1d8f4c6789abcd12345ef678901ab234567": "Cerberus",
-    # BankBot family
-    "a1b2c3d4e5f6789012345678901234abcdef5678": "BankBot",
-    # Anubis/TeaBot
-    "dead0f1ced0ff1cebeef1234567890abcdef0001": "Anubis/TeaBot",
+    # Standard Android debug keystore (keytool default DN; recycled in repackaged/trojanised APKs)
+    # Note: CN is also caught by _DEBUG_CERT_SUBJECT_PATTERN; thumbprint gives strength=1.0
+    "a40da80a59d170caa950cf15c18c454d47a39b26": "android_debug_cert_repack",
+    # ── ADD MORE FROM YOUR OWN MALWARE CORPUS ────────────────────────────────────
+    # Extract with:  apksigner verify --print-certs sample.apk
+    #           or:  keytool -printcert -jarfile sample.apk
+    # Format: "<sha1_40hex_no_colons_lowercase>": "<FamilyName>",
 }
 
 # Suspicious subject CN / O patterns in signing certs
@@ -646,6 +673,34 @@ def normalize_components(components: Dict[str, Any]) -> List[EvidenceItem]:
                         behavior_tags=tags,
                         explanation=f"Component requires {perm}",
                         benign_alternatives=benign_alts,
+                    ))
+
+            # Exposed-without-permission: receiver/service with custom actions but no protection
+            # Any app on the device can send a broadcast to trigger it — classic C2 command channel
+            if comp_type in ("receivers", "services") and not perm:
+                custom_actions = [
+                    a for a in (filter_info.get("action", []) or [])
+                    if not a.startswith(("android.", "com.google.", "com.android."))
+                ]
+                for action in custom_actions[:3]:  # cap to avoid flooding clusters
+                    eid = make_evidence_id("component", f"exposed:{action}", source_loc)
+                    if eid in seen_ids:
+                        continue
+                    seen_ids.add(eid)
+                    comp_singular = comp_type.rstrip("s")
+                    items.append(EvidenceItem(
+                        id=eid,
+                        kind="component",
+                        value=f"{comp_singular}:{comp_name} [unprotected action:{action}]",
+                        source_location=source_loc,
+                        direction="ambiguous",
+                        strength=0.50,
+                        behavior_tags=["c2_networking"],
+                        explanation=(
+                            f"Exported {comp_singular} responds to custom action '{action}' with no "
+                            f"android:permission guard — any app on the device can trigger it remotely"
+                        ),
+                        benign_alternatives="Plugin architecture, inter-app communication frameworks",
                     ))
 
     return items
