@@ -95,10 +95,49 @@ The default VT filter is also stricter now: `type:apk and tag:apk and not tag:fa
 - Samples marked `done` are skipped on rerun.
 - Samples marked `corrupt` are skipped on rerun.
 - Samples marked `failed` are retried on rerun.
+- The analyzer now supports multiple LLM API keys via `llm_V1/config.json` using `llm_api_keys`.
+- One analyzer worker process is started per configured LLM key.
+- Sample claiming is coordinated through `analysis_state.sqlite`, so the same APK is not analyzed twice in parallel.
+- If one LLM key starts returning repeated errors or no responses, only that worker stops; its current APK is marked `failed` and can be reclaimed by another healthy worker later.
+- The overall analysis run only becomes a global failure when all analyzer keys are unusable, or when failed/in-progress rows remain after workers finish.
 - Corrupt means the APK could not be parsed by the Androguard-based analysis stage.
 - After each analysis pass, samples marked `done` or `corrupt` are deleted from the batch folder immediately.
 - If the whole batch finishes successfully and `cleanup_samples_after_analysis` is enabled, the remaining batch directory is removed entirely.
 - If `master_summary.log` is lost but the batch `analysis_state.sqlite` still exists, you can rebuild most or all of it with `python llm_V1/rebuild_master_summary.py <report_dir>`. Exact `done` entries require either the matching `*_verdict.json` or `*_llm_analysis.log`, because the SQLite row stores status and file paths but not the full verdict blob.
+
+### Analyzer LLM key config
+
+The analyzer reads its own config from `llm_V1/config.json`.
+
+Single-key legacy mode still works:
+
+```json
+{
+  "base_url_zllama": "https://your-endpoint.example/v1",
+  "api_key_zllama": "key-1"
+}
+```
+
+Multi-key mode starts one isolated analyzer worker per entry:
+
+```json
+{
+  "base_url_zllama": "https://your-endpoint.example/v1",
+  "llm_api_keys": [
+    {"name": "runner-1", "api_key": "key-1"},
+    {"name": "runner-2", "api_key": "key-2"},
+    {"name": "runner-3", "api_key": "key-3"}
+  ]
+}
+```
+
+Optional per-key `base_url` is also supported if different keys need different compatible endpoints.
+
+To regression-test the scheduler without real APK tooling or real API calls, run:
+
+```bash
+python llm_V1/test_multi_key_runner.py
+```
 
 ### Override families or sample cap for one run
 

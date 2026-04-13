@@ -3,6 +3,11 @@ import statistics
 import hashlib
 import sys
 import os
+import threading
+import subprocess
+import time
+import uuid
+from dataclasses import dataclass
 from typing import Dict, Any, List
 import zipfile
 import re
@@ -32,10 +37,108 @@ logging.basicConfig(
 
 # -------------------- CONFIG --------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 
-with open(os.path.join(SCRIPT_DIR, "config.json"), "r", encoding="utf-8") as f:
-    config = json.load(f)
-client = openai.OpenAI(api_key=config.get("api_key_zllama"), base_url=config.get("base_url_zllama"))
+
+@dataclass(frozen=True)
+class LLMKeyConfig:
+    name: str
+    api_key: str
+    base_url: Optional[str] = None
+
+
+def load_runtime_config() -> Dict[str, Any]:
+    if not os.path.isfile(CONFIG_PATH):
+        return {}
+
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        raw = f.read().strip()
+
+    if not raw:
+        return {}
+
+    payload = json.loads(raw)
+    return payload if isinstance(payload, dict) else {}
+
+
+def load_llm_key_configs(config: Dict[str, Any]) -> List[LLMKeyConfig]:
+    base_url = config.get("base_url_zllama")
+    keys: List[LLMKeyConfig] = []
+
+    configured_entries = config.get("llm_api_keys")
+    if isinstance(configured_entries, list):
+        for idx, entry in enumerate(configured_entries, start=1):
+            if isinstance(entry, dict):
+                api_key = str(entry.get("api_key") or entry.get("value") or "").strip()
+                if not api_key:
+                    continue
+                name = str(entry.get("name") or f"runner-{idx}").strip() or f"runner-{idx}"
+                keys.append(
+                    LLMKeyConfig(
+                        name=name,
+                        api_key=api_key,
+                        base_url=str(entry.get("base_url") or base_url or "").strip() or None,
+                    )
+                )
+            else:
+                api_key = str(entry or "").strip()
+                if api_key:
+                    keys.append(
+                        LLMKeyConfig(
+                            name=f"runner-{idx}",
+                            api_key=api_key,
+                            base_url=str(base_url or "").strip() or None,
+                        )
+                    )
+
+    if keys:
+        return keys
+
+    legacy_key = str(config.get("api_key_zllama") or "").strip()
+    if legacy_key:
+        return [
+            LLMKeyConfig(
+                name=str(config.get("llm_runner_name") or "runner-1").strip() or "runner-1",
+                api_key=legacy_key,
+                base_url=str(base_url or "").strip() or None,
+            )
+        ]
+
+    return []
+
+
+def create_llm_client(key_config: LLMKeyConfig) -> OpenAI:
+    kwargs: Dict[str, Any] = {"api_key": key_config.api_key}
+    if key_config.base_url:
+        kwargs["base_url"] = key_config.base_url
+    return OpenAI(**kwargs)
+
+
+def sanitize_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "worker")).strip("._") or "worker"
+
+
+def utc_after_iso(seconds: float) -> str:
+    return (dt.datetime.now(tz=dt.timezone.utc) + dt.timedelta(seconds=float(seconds))).isoformat()
+
+
+def pick_llm_key_config(key_name: Optional[str], config: Dict[str, Any]) -> LLMKeyConfig:
+    keys = load_llm_key_configs(config)
+    if not keys:
+        raise RuntimeError(
+            "No LLM API keys configured in llm_V1/config.json. "
+            "Set api_key_zllama for single-key mode or llm_api_keys for multi-key mode."
+        )
+
+    if key_name is None:
+        return keys[0]
+
+    for key in keys:
+        if key.name == key_name:
+            return key
+
+    available = ", ".join(key.name for key in keys)
+    raise RuntimeError(f"Unknown llm key name {key_name!r}. Available keys: {available}")
 
 # -------------------- CONSTANTS --------------------
 SUSPICIOUS_TLDS = {".ru", ".cn", ".su", ".top", ".xyz", ".click", ".pw", ".kim"}
@@ -85,6 +188,8 @@ PRIVATE_IP_RANGES = [
 ]
 TERMINAL_SAMPLE_STATUSES = {"done", "corrupt"}
 RETRYABLE_SAMPLE_STATUSES = {"failed", "in_progress"}
+RUNNER_KEY_UNAVAILABLE_EXIT_CODE = 20
+WORKER_RESCAN_SLEEP_SEC = 5.0
 
 
 def is_terminal_corrupt_error(error: Exception) -> bool:
@@ -106,41 +211,63 @@ class AnalysisStateDB:
     def __init__(self, path: str):
         self.path = path
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        self.conn = sqlite3.connect(path, timeout=60)
-        self.conn.execute("PRAGMA journal_mode=WAL;")
-        self.conn.execute("PRAGMA busy_timeout=60000;")
         self._init()
 
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=60)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=60000;")
+        return conn
+
     def _init(self):
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS analysis_samples (
-              sha256 TEXT PRIMARY KEY,
-              apk_name TEXT NOT NULL,
-              apk_path TEXT NOT NULL,
-              status TEXT NOT NULL,
-              attempts INTEGER NOT NULL DEFAULT 0,
-              last_error TEXT,
-              log_path TEXT,
-              verdict_path TEXT,
-              started_at_utc TEXT,
-              finished_at_utc TEXT
-            );
-            """
-        )
-        self.conn.commit()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS analysis_samples (
+                  sha256 TEXT PRIMARY KEY,
+                  apk_name TEXT NOT NULL,
+                  apk_path TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  attempts INTEGER NOT NULL DEFAULT 0,
+                  last_error TEXT,
+                  log_path TEXT,
+                  verdict_path TEXT,
+                  started_at_utc TEXT,
+                  finished_at_utc TEXT,
+                  runner_id TEXT,
+                  llm_key_name TEXT,
+                  lease_expires_at_utc TEXT
+                );
+                """
+            )
+            existing_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(analysis_samples);").fetchall()
+            }
+            required_columns = {
+                "runner_id": "TEXT",
+                "llm_key_name": "TEXT",
+                "lease_expires_at_utc": "TEXT",
+            }
+            for column_name, column_type in required_columns.items():
+                if column_name not in existing_columns:
+                    conn.execute(
+                        f"ALTER TABLE analysis_samples ADD COLUMN {column_name} {column_type};"
+                    )
+            conn.commit()
 
     def get(self, sha256: str) -> Optional[Dict[str, Any]]:
-        cur = self.conn.execute(
-            """
-            SELECT sha256, apk_name, apk_path, status, attempts, last_error,
-                   log_path, verdict_path, started_at_utc, finished_at_utc
-            FROM analysis_samples
-            WHERE sha256 = ?;
-            """,
-            (sha256,),
-        )
-        row = cur.fetchone()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT sha256, apk_name, apk_path, status, attempts, last_error,
+                       log_path, verdict_path, started_at_utc, finished_at_utc,
+                       runner_id, llm_key_name, lease_expires_at_utc
+                FROM analysis_samples
+                WHERE sha256 = ?;
+                """,
+                (sha256,),
+            )
+            row = cur.fetchone()
         if row is None:
             return None
         return {
@@ -154,51 +281,169 @@ class AnalysisStateDB:
             "verdict_path": row[7],
             "started_at_utc": row[8],
             "finished_at_utc": row[9],
+            "runner_id": row[10],
+            "llm_key_name": row[11],
+            "lease_expires_at_utc": row[12],
         }
 
-    def start_attempt(self, *, sha256: str, apk_name: str, apk_path: str, log_path: str, verdict_path: str):
+    def try_claim(
+        self,
+        *,
+        sha256: str,
+        apk_name: str,
+        apk_path: str,
+        log_path: str,
+        verdict_path: str,
+        runner_id: str,
+        llm_key_name: str,
+        lease_duration_sec: float,
+    ) -> bool:
         now = utc_now_iso()
-        self.conn.execute(
-            """
-            INSERT INTO analysis_samples
-              (sha256, apk_name, apk_path, status, attempts, log_path, verdict_path, started_at_utc, finished_at_utc)
-            VALUES (?, ?, ?, 'in_progress', 1, ?, ?, ?, NULL)
-            ON CONFLICT(sha256) DO UPDATE SET
-              apk_name = excluded.apk_name,
-              apk_path = excluded.apk_path,
-              status = 'in_progress',
-              attempts = analysis_samples.attempts + 1,
-              log_path = excluded.log_path,
-              verdict_path = excluded.verdict_path,
-              started_at_utc = excluded.started_at_utc,
-              finished_at_utc = NULL;
-            """,
-            (sha256, apk_name, apk_path, log_path, verdict_path, now),
-        )
-        self.conn.commit()
+        lease_expires_at = utc_after_iso(lease_duration_sec)
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO analysis_samples
+                  (sha256, apk_name, apk_path, status, attempts, log_path, verdict_path,
+                   started_at_utc, finished_at_utc, runner_id, llm_key_name, lease_expires_at_utc)
+                VALUES (?, ?, ?, 'in_progress', 1, ?, ?, ?, NULL, ?, ?, ?)
+                ON CONFLICT(sha256) DO UPDATE SET
+                  apk_name = excluded.apk_name,
+                  apk_path = excluded.apk_path,
+                  status = 'in_progress',
+                  attempts = analysis_samples.attempts + 1,
+                  last_error = NULL,
+                  log_path = excluded.log_path,
+                  verdict_path = excluded.verdict_path,
+                  started_at_utc = excluded.started_at_utc,
+                  finished_at_utc = NULL,
+                  runner_id = excluded.runner_id,
+                  llm_key_name = excluded.llm_key_name,
+                  lease_expires_at_utc = excluded.lease_expires_at_utc
+                WHERE analysis_samples.status NOT IN ('done', 'corrupt')
+                  AND (
+                    analysis_samples.status != 'in_progress'
+                    OR COALESCE(analysis_samples.lease_expires_at_utc, '') <= ?
+                    OR analysis_samples.runner_id = ?
+                  );
+                """,
+                (
+                    sha256,
+                    apk_name,
+                    apk_path,
+                    log_path,
+                    verdict_path,
+                    now,
+                    runner_id,
+                    llm_key_name,
+                    lease_expires_at,
+                    now,
+                    runner_id,
+                ),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0) > 0
 
-    def finish(self, *, sha256: str, status: str, last_error: Optional[str] = None):
-        self.conn.execute(
-            """
-            UPDATE analysis_samples
-            SET status = ?, last_error = ?, finished_at_utc = ?
-            WHERE sha256 = ?;
-            """,
-            (status, last_error, utc_now_iso(), sha256),
-        )
-        self.conn.commit()
+    def renew_lease(self, *, sha256: str, runner_id: str, lease_duration_sec: float) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE analysis_samples
+                SET lease_expires_at_utc = ?
+                WHERE sha256 = ? AND runner_id = ? AND status = 'in_progress';
+                """,
+                (utc_after_iso(lease_duration_sec), sha256, runner_id),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0) > 0
+
+    def finish(
+        self,
+        *,
+        sha256: str,
+        status: str,
+        last_error: Optional[str] = None,
+        runner_id: Optional[str] = None,
+    ):
+        where_clause = "WHERE sha256 = ?"
+        params: List[Any] = [status, last_error, utc_now_iso()]
+        if runner_id:
+            where_clause += " AND runner_id = ?"
+        params.append(sha256)
+        if runner_id:
+            params.append(runner_id)
+
+        with self._connect() as conn:
+            conn.execute(
+                f"""
+                UPDATE analysis_samples
+                SET status = ?, last_error = ?, finished_at_utc = ?,
+                    runner_id = NULL, lease_expires_at_utc = NULL
+                {where_clause};
+                """,
+                params,
+            )
+            conn.commit()
 
     def status_counts(self) -> Dict[str, int]:
         counts: Dict[str, int] = {}
-        cur = self.conn.execute(
-            "SELECT status, COUNT(*) FROM analysis_samples GROUP BY status;"
-        )
-        for status, count in cur.fetchall():
-            counts[str(status)] = int(count)
+        with self._connect() as conn:
+            cur = conn.execute(
+                "SELECT status, COUNT(*) FROM analysis_samples GROUP BY status;"
+            )
+            for status, count in cur.fetchall():
+                counts[str(status)] = int(count)
         return counts
 
     def close(self):
-        self.conn.close()
+        return None
+
+
+class LeaseHeartbeat:
+    def __init__(
+        self,
+        *,
+        state_db: AnalysisStateDB,
+        sha256: str,
+        runner_id: str,
+        lease_duration_sec: float,
+        logger,
+    ):
+        self.state_db = state_db
+        self.sha256 = sha256
+        self.runner_id = runner_id
+        self.lease_duration_sec = float(lease_duration_sec)
+        self.logger = logger
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        refresh_interval = max(30.0, min(self.lease_duration_sec / 3.0, 300.0))
+
+        def keep_alive() -> None:
+            while not self._stop.wait(refresh_interval):
+                try:
+                    renewed = self.state_db.renew_lease(
+                        sha256=self.sha256,
+                        runner_id=self.runner_id,
+                        lease_duration_sec=self.lease_duration_sec,
+                    )
+                    if not renewed:
+                        self.logger.warning(
+                            "Lease renewal skipped because sample ownership changed for %s",
+                            self.sha256,
+                        )
+                        return
+                except Exception as exc:
+                    self.logger.warning("Lease renewal failed for %s: %s", self.sha256, exc)
+
+        self._thread = threading.Thread(target=keep_alive, name=f"lease-{self.sha256[:8]}", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
 
 
 def utc_now_iso() -> str:
@@ -262,13 +507,13 @@ def run_tools(apk_path, logger):
             logger.error(f"Tool {tool_name} failed: {e}")
     return results
 
-def call_llm(messages, model, logger, max_retries=3):
+def call_llm(messages, model, logger, llm_client: OpenAI, max_retries=3):
     """
     Call LLM through the ZLlama/OpenAI-compatible client.
     """
     for attempt in range(1, max_retries + 1):
         try:
-            response = client.chat.completions.create(
+            response = llm_client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=0.2,
@@ -480,7 +725,7 @@ def normalize_tool_dict(value, *, logger, tool_name: str) -> Dict[str, Any]:
 
 
 # -------------------- CHUNK ANALYZERS --------------------
-def analyze_strings_with_chunking(apk_strings: List[str], logger, model, chunk_size=200):
+def analyze_strings_with_chunking(apk_strings: List[str], logger, model, llm_client: OpenAI, chunk_size=200):
     apk_strings = normalize_tool_list(apk_strings, logger=logger, tool_name="get_interesting_strings")
     if not apk_strings:
         return {
@@ -492,7 +737,7 @@ def analyze_strings_with_chunking(apk_strings: List[str], logger, model, chunk_s
     all_relevant, all_evidence, summaries = [], [], []
     for idx, chunk in enumerate(chunk_list(apk_strings, size=chunk_size), start=1):
         logger.info(f"[strings] Analyzing chunk {idx} ({len(chunk)} items)")
-        result = call_llm(prompt_strings_chunk("\n".join(chunk)), model, logger) or {}
+        result = call_llm(prompt_strings_chunk("\n".join(chunk)), model, logger, llm_client) or {}
 
         if result:
             if isinstance(result,dict):
@@ -512,7 +757,7 @@ def analyze_strings_with_chunking(apk_strings: List[str], logger, model, chunk_s
         "evidence": all_evidence
     }
 
-def analyze_permissions_with_chunking(apk_perms: List[str], logger, model, chunk_size=100):
+def analyze_permissions_with_chunking(apk_perms: List[str], logger, model, llm_client: OpenAI, chunk_size=100):
     apk_perms = normalize_tool_list(apk_perms, logger=logger, tool_name="get_permissions")
     if not apk_perms:
         return {
@@ -524,7 +769,7 @@ def analyze_permissions_with_chunking(apk_perms: List[str], logger, model, chunk
     all_relevant, all_evidence, summaries = [], [], []
     for idx, chunk in enumerate(chunk_list(apk_perms, size=chunk_size), start=1):
         logger.info(f"[perms] Analyzing chunk {idx} ({len(chunk)} items)")
-        result = call_llm(prompt_permissions_chunk("\n".join(chunk)),model, logger) or {}
+        result = call_llm(prompt_permissions_chunk("\n".join(chunk)), model, logger, llm_client) or {}
         
         if result:
             if isinstance(result,dict):
@@ -545,7 +790,7 @@ def analyze_permissions_with_chunking(apk_perms: List[str], logger, model, chunk
         "evidence": all_evidence
     }
 
-def analyze_classes_with_chunking(apk_classes: dict, logger, model, chunk_size=1):
+def analyze_classes_with_chunking(apk_classes: dict, logger, model, llm_client: OpenAI, chunk_size=1):
     apk_classes = normalize_tool_dict(apk_classes, logger=logger, tool_name="get_interesting_classes")
     if not apk_classes:
         return {
@@ -559,7 +804,7 @@ def analyze_classes_with_chunking(apk_classes: dict, logger, model, chunk_size=1
     for idx, chunk in enumerate(chunk_list(items, size=chunk_size), start=1):
         logger.info(f"[classes] Analyzing class {idx}")
         chunk_str = "\n\n".join(f"{classname}:\n{code}" for classname, code in chunk)
-        result = call_llm(prompt_classes_chunk(chunk_str), model, logger) or {}
+        result = call_llm(prompt_classes_chunk(chunk_str), model, logger, llm_client) or {}
         
         if result:
             if isinstance(result,dict):
@@ -580,7 +825,7 @@ def analyze_classes_with_chunking(apk_classes: dict, logger, model, chunk_size=1
         "evidence": all_evidence
     }
 
-def analyze_methods_with_chunking(apk_methods: dict, logger, model, chunk_size=5):
+def analyze_methods_with_chunking(apk_methods: dict, logger, model, llm_client: OpenAI, chunk_size=5):
     apk_methods = normalize_tool_dict(apk_methods, logger=logger, tool_name="get_interesting_methods")
     if apk_methods:
         all_relevant, all_evidence, summaries = [], [], []
@@ -588,7 +833,7 @@ def analyze_methods_with_chunking(apk_methods: dict, logger, model, chunk_size=5
         for idx, chunk in enumerate(chunk_list(items, size=chunk_size), start=1):
             logger.info(f"[methods] Analyzing method {idx}")
             chunk_str = "\n\n".join(f"{methodname}:\n{code}" for methodname, code in chunk)
-            result = call_llm(prompt_methods_chunk(chunk_str), model, logger) or {}
+            result = call_llm(prompt_methods_chunk(chunk_str), model, logger, llm_client) or {}
             
             if result:
                 if isinstance(result,dict):
@@ -792,6 +1037,7 @@ def final_llm_verdict(
     preliminary_iocs,
     consolidated_evidence,
     logger,
+    llm_client: OpenAI,
 ):
     # # Step 1: consolidate evidence
     # raw_evidence = {
@@ -874,7 +1120,7 @@ def final_llm_verdict(
 
     # Step 5: log & call LLM
     safe_log(logger, json.dumps(user_content, indent=2, ensure_ascii=False))
-    verdict = call_llm(messages, "claude-4-sonnet", logger)
+    verdict = call_llm(messages, "claude-4-sonnet", logger, llm_client)
     normalized_verdict = normalize_final_verdict(verdict, logger)
     if normalized_verdict is None:
         raise RuntimeError("Final LLM verdict unavailable or invalid after retries")
@@ -882,7 +1128,7 @@ def final_llm_verdict(
 
 
 # -------------------- PIPELINE --------------------
-def analyze_apk_pipeline(apk_path, logger):
+def analyze_apk_pipeline(apk_path, logger, llm_client: OpenAI):
     """
     Full pipeline for analyzing an APK.
     Integrates string/class/permission analysis, static tools, YARA, consolidation, and verdict scoring.
@@ -892,16 +1138,16 @@ def analyze_apk_pipeline(apk_path, logger):
 
     tool_results = run_tools(apk_path, logger)
     strings_raw = tool_results.get("get_interesting_strings", [])
-    strings_out = analyze_strings_with_chunking(strings_raw, logger,"gpt-4.1-mini")
+    strings_out = analyze_strings_with_chunking(strings_raw, logger, "gpt-4.1-mini", llm_client)
 
     classes_raw = tool_results.get("get_interesting_classes", {})
-    classes_out = analyze_classes_with_chunking(classes_raw, logger,"gpt-4.1-mini")
+    classes_out = analyze_classes_with_chunking(classes_raw, logger, "gpt-4.1-mini", llm_client)
 
     # methods_raw = tool_results.get("get_interesting_methods",{})
     # methods_out = analyze_methods_with_chunking(methods_raw,logger,"gpt-4.1-mini")
 
     perms_raw = tool_results.get("get_permissions", [])
-    perms_out = analyze_permissions_with_chunking(perms_raw or [], logger,"gpt-4.1-mini")
+    perms_out = analyze_permissions_with_chunking(perms_raw or [], logger, "gpt-4.1-mini", llm_client)
 
     yara_report = add_yara_scan_result(apk_path)
     yara_evidence = []
@@ -952,7 +1198,8 @@ def analyze_apk_pipeline(apk_path, logger):
         preliminary_risk=risk,
         preliminary_iocs=iocs,
         consolidated_evidence=consolidated,
-        logger=logger
+        logger=logger,
+        llm_client=llm_client,
     )
 
     return verdict
@@ -983,6 +1230,10 @@ def analyze_sample_with_state(
     report_dir: str,
     state_db: AnalysisStateDB,
     master_log,
+    llm_client: OpenAI,
+    llm_key_name: str,
+    runner_id: str,
+    lease_duration_sec: float,
 ) -> str:
     apk_name = os.path.splitext(os.path.basename(apk_path))[0]
     sha256 = compute_file_sha256(apk_path)
@@ -992,16 +1243,36 @@ def analyze_sample_with_state(
     existing = state_db.get(sha256)
     if existing and existing.get("status") in TERMINAL_SAMPLE_STATUSES:
         print(f"[skip] {apk_name} already marked {existing['status']}")
-        return "skipped"
+        return "skipped_terminal"
 
-    logger = setup_logger(log_path, apk_name)
-    state_db.start_attempt(
+    claimed = state_db.try_claim(
         sha256=sha256,
         apk_name=apk_name,
         apk_path=apk_path,
         log_path=log_path,
         verdict_path=verdict_path,
+        runner_id=runner_id,
+        llm_key_name=llm_key_name,
+        lease_duration_sec=lease_duration_sec,
     )
+    if not claimed:
+        existing = state_db.get(sha256)
+        if existing and existing.get("status") in TERMINAL_SAMPLE_STATUSES:
+            print(f"[skip] {apk_name} already marked {existing['status']}")
+        else:
+            owner = (existing or {}).get("runner_id") or "another-runner"
+            print(f"[skip] {apk_name} already claimed by {owner}")
+        return "claimed_elsewhere"
+
+    logger = setup_logger(log_path, apk_name)
+    lease_heartbeat = LeaseHeartbeat(
+        state_db=state_db,
+        sha256=sha256,
+        runner_id=runner_id,
+        lease_duration_sec=lease_duration_sec,
+        logger=logger,
+    )
+    lease_heartbeat.start()
 
     try:
         readable, parse_error = probe_apk_readability(apk_path)
@@ -1016,10 +1287,10 @@ def analyze_sample_with_state(
             write_json(verdict_path, payload)
             master_log.write(f"{apk_name}: {json.dumps(payload, ensure_ascii=False)}\n")
             master_log.flush()
-            state_db.finish(sha256=sha256, status="corrupt", last_error=parse_error)
+            state_db.finish(sha256=sha256, status="corrupt", last_error=parse_error, runner_id=runner_id)
             return "corrupt"
 
-        verdict = analyze_apk_pipeline(apk_path, logger)
+        verdict = analyze_apk_pipeline(apk_path, logger, llm_client)
         if not isinstance(verdict, dict) or not verdict:
             raise RuntimeError("Analyzer returned no verdict")
 
@@ -1035,7 +1306,7 @@ def analyze_sample_with_state(
         master_log.write(f"{apk_name}: {json.dumps(verdict, ensure_ascii=False)}\n")
         master_log.flush()
 
-        state_db.finish(sha256=sha256, status="done", last_error=None)
+        state_db.finish(sha256=sha256, status="done", last_error=None, runner_id=runner_id)
         return "done"
 
     except Exception as e:
@@ -1050,7 +1321,7 @@ def analyze_sample_with_state(
             write_json(verdict_path, payload)
             master_log.write(f"{apk_name}: {json.dumps(payload, ensure_ascii=False)}\n")
             master_log.flush()
-            state_db.finish(sha256=sha256, status="corrupt", last_error=str(e))
+            state_db.finish(sha256=sha256, status="corrupt", last_error=str(e), runner_id=runner_id)
             return "corrupt"
 
         if isinstance(e, LLMUnavailableError):
@@ -1061,28 +1332,258 @@ def analyze_sample_with_state(
                 "error": str(e),
             }
             write_json(verdict_path, payload)
-            state_db.finish(sha256=sha256, status="failed", last_error=str(e))
-            return "halted_failed"
+            state_db.finish(sha256=sha256, status="failed", last_error=str(e), runner_id=runner_id)
+            return "key_unavailable"
 
-        state_db.finish(sha256=sha256, status="failed", last_error=str(e))
+        state_db.finish(sha256=sha256, status="failed", last_error=str(e), runner_id=runner_id)
         return "failed"
     finally:
+        lease_heartbeat.stop()
         clear_apk_context(apk_path)
         for h in list(logger.handlers):
             h.close()
             logger.removeHandler(h)
 
 
-# -------------------- MAIN --------------------
-if __name__ == "__main__":
+def merge_runner_master_logs(report_dir: str) -> str:
+    merged_path = os.path.join(report_dir, "master_summary.log")
+    runner_logs = sorted(
+        os.path.join(report_dir, name)
+        for name in os.listdir(report_dir)
+        if name.startswith("master_summary_") and name.endswith(".log")
+    )
+    with open(merged_path, "w", encoding="utf-8") as out_f:
+        for log_path in runner_logs:
+            with open(log_path, "r", encoding="utf-8") as in_f:
+                out_f.write(in_f.read())
+    return merged_path
+
+
+def write_run_summary(
+    report_dir: str,
+    *,
+    counts: Dict[str, int],
+    run_counts: Dict[str, int],
+    runner_id: Optional[str] = None,
+    llm_key_name: Optional[str] = None,
+    output_name: str = "analysis_run_summary.json",
+) -> Dict[str, Any]:
+    summary_payload: Dict[str, Any] = {
+        "counts": counts,
+        "run_counts": run_counts,
+    }
+    if runner_id:
+        summary_payload["runner_id"] = runner_id
+    if llm_key_name:
+        summary_payload["llm_key_name"] = llm_key_name
+    write_json(os.path.join(report_dir, output_name), summary_payload)
+    return summary_payload
+
+
+def run_single_runner(
+    *,
+    folder_path: str,
+    report_dir: str,
+    llm_key_config: LLMKeyConfig,
+    lease_duration_sec: float,
+    worker_mode: bool,
+) -> int:
     register_apk_tools()
 
+    apk_files = sorted(f for f in os.listdir(folder_path) if isapk(folder_path + os.sep + f))
+    if not apk_files:
+        print("No APK files found in the folder.")
+        return 0
+
+    runner_id = f"{sanitize_name(llm_key_config.name)}-pid{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    llm_client = create_llm_client(llm_key_config)
+    state_db = AnalysisStateDB(os.path.join(report_dir, "analysis_state.sqlite"))
+    master_log_name = (
+        f"master_summary_{sanitize_name(llm_key_config.name)}_{os.getpid()}.log"
+        if worker_mode
+        else "master_summary.log"
+    )
+    master_log_path = os.path.join(report_dir, master_log_name)
+    run_counts = {"done": 0, "failed": 0, "corrupt": 0, "skipped": 0}
+    first_pass = True
+
+    print(f"[runner:{runner_id}] starting with key={llm_key_config.name}")
+    with open(master_log_path, "a", encoding="utf-8") as master_log:
+        while True:
+            pass_completed = 0
+            pass_contended = 0
+            key_unavailable = False
+
+            for apk_file in apk_files:
+                apk_path = os.path.join(folder_path, apk_file)
+                print(f"\n[runner:{runner_id}] [📦 Processing APK: {apk_file}]")
+                status = analyze_sample_with_state(
+                    apk_path=apk_path,
+                    report_dir=report_dir,
+                    state_db=state_db,
+                    master_log=master_log,
+                    llm_client=llm_client,
+                    llm_key_name=llm_key_config.name,
+                    runner_id=runner_id,
+                    lease_duration_sec=lease_duration_sec,
+                )
+
+                if status == "key_unavailable":
+                    run_counts["failed"] += 1
+                    key_unavailable = True
+                    print(
+                        f"[runner:{runner_id}] disabling key {llm_key_config.name} because it is "
+                        "returning errors or no responses"
+                    )
+                    break
+
+                if status in {"done", "failed", "corrupt"}:
+                    run_counts[status] += 1
+                    pass_completed += 1
+                    continue
+
+                if status == "claimed_elsewhere":
+                    pass_contended += 1
+                    continue
+
+                if first_pass and status == "skipped_terminal":
+                    run_counts["skipped"] += 1
+
+            first_pass = False
+
+            if key_unavailable:
+                counts = state_db.status_counts()
+                summary_name = f"analysis_run_summary_{sanitize_name(llm_key_config.name)}_{os.getpid()}.json"
+                summary_payload = write_run_summary(
+                    report_dir,
+                    counts=counts,
+                    run_counts=run_counts,
+                    runner_id=runner_id,
+                    llm_key_name=llm_key_config.name,
+                    output_name=summary_name if worker_mode else "analysis_run_summary.json",
+                )
+                summary_payload["key_disabled"] = True
+                write_json(os.path.join(report_dir, summary_name if worker_mode else "analysis_run_summary.json"), summary_payload)
+                state_db.close()
+                print(json.dumps(summary_payload, indent=2, ensure_ascii=False))
+                return RUNNER_KEY_UNAVAILABLE_EXIT_CODE
+
+            if pass_completed > 0:
+                continue
+
+            if pass_contended > 0:
+                print(
+                    f"[runner:{runner_id}] waiting {WORKER_RESCAN_SLEEP_SEC:.1f}s for "
+                    f"{pass_contended} sample(s) currently owned by other runners"
+                )
+                time.sleep(WORKER_RESCAN_SLEEP_SEC)
+                continue
+
+            break
+
+    counts = state_db.status_counts()
+    summary_name = (
+        f"analysis_run_summary_{sanitize_name(llm_key_config.name)}_{os.getpid()}.json"
+        if worker_mode
+        else "analysis_run_summary.json"
+    )
+    summary_payload = write_run_summary(
+        report_dir,
+        counts=counts,
+        run_counts=run_counts,
+        runner_id=runner_id,
+        llm_key_name=llm_key_config.name,
+        output_name=summary_name,
+    )
+    state_db.close()
+    print(json.dumps(summary_payload, indent=2, ensure_ascii=False))
+    if counts.get("failed", 0) > 0 or counts.get("in_progress", 0) > 0:
+        return 2
+    return 0
+
+
+def run_multi_key_parent(
+    *,
+    folder_path: str,
+    report_dir: str,
+    lease_duration_sec: float,
+    key_configs: List[LLMKeyConfig],
+) -> int:
+    worker_procs: List[Tuple[LLMKeyConfig, subprocess.Popen]] = []
+    for key_config in key_configs:
+        cmd = [
+            sys.executable,
+            os.path.abspath(__file__),
+            folder_path,
+            "--report-dir",
+            report_dir,
+            "--llm-key-name",
+            key_config.name,
+            "--worker-mode",
+            "--lease-hours",
+            str(lease_duration_sec / 3600.0),
+        ]
+        print(f"[parent] starting worker for key={key_config.name}: {' '.join(cmd)}")
+        proc = subprocess.Popen(cmd, cwd=SCRIPT_DIR)
+        worker_procs.append((key_config, proc))
+
+    worker_results: List[Dict[str, Any]] = []
+    highest_rc = 0
+    disabled_key_count = 0
+    for key_config, proc in worker_procs:
+        rc = int(proc.wait())
+        highest_rc = max(highest_rc, rc)
+        worker_results.append({"llm_key_name": key_config.name, "exit_code": rc})
+        if rc == RUNNER_KEY_UNAVAILABLE_EXIT_CODE:
+            disabled_key_count += 1
+        print(f"[parent] worker key={key_config.name} exited with code {rc}")
+
+    state_db = AnalysisStateDB(os.path.join(report_dir, "analysis_state.sqlite"))
+    counts = state_db.status_counts()
+    state_db.close()
+    merge_runner_master_logs(report_dir)
+    summary_payload = write_run_summary(
+        report_dir,
+        counts=counts,
+        run_counts={"done": 0, "failed": 0, "corrupt": 0, "skipped": 0},
+    )
+    summary_payload["worker_results"] = worker_results
+    summary_payload["disabled_key_count"] = disabled_key_count
+    summary_payload["all_keys_unavailable"] = disabled_key_count == len(key_configs)
+    write_json(os.path.join(report_dir, "analysis_run_summary.json"), summary_payload)
+    print(json.dumps(summary_payload, indent=2, ensure_ascii=False))
+
+    if counts.get("failed", 0) > 0 or counts.get("in_progress", 0) > 0:
+        return 2
+    if disabled_key_count == len(key_configs):
+        return 2
+    return 0 if highest_rc == RUNNER_KEY_UNAVAILABLE_EXIT_CODE else highest_rc
+
+
+# -------------------- MAIN --------------------
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze APK files in a folder.")
     parser.add_argument("apk_folder", help="Folder containing APK samples")
     parser.add_argument(
         "--report-dir",
         default=None,
         help="Optional folder where logs/reports should be written. Defaults to apk_folder.",
+    )
+    parser.add_argument(
+        "--llm-key-name",
+        default=None,
+        help="Run with a specific llm_api_keys entry name from config.json.",
+    )
+    parser.add_argument(
+        "--worker-mode",
+        action="store_true",
+        help="Internal flag used by the parent runner to launch one subprocess per API key.",
+    )
+    parser.add_argument(
+        "--lease-hours",
+        type=float,
+        default=6.0,
+        help="How long a sample claim stays valid before another runner may recover it after a crash.",
     )
     args = parser.parse_args()
 
@@ -1093,46 +1594,32 @@ if __name__ == "__main__":
 
     report_dir = args.report_dir or folder_path
     os.makedirs(report_dir, exist_ok=True)
+    config = load_runtime_config()
+    key_configs = load_llm_key_configs(config)
+    if not key_configs:
+        raise SystemExit(
+            "No LLM API keys configured in llm_V1/config.json. "
+            "Add api_key_zllama or llm_api_keys before running analysis."
+        )
 
-    apk_files = sorted(f for f in os.listdir(folder_path) if isapk(folder_path+os.sep+f))
+    if args.worker_mode or args.llm_key_name or len(key_configs) == 1:
+        llm_key_config = pick_llm_key_config(args.llm_key_name, config)
+        exit_code = run_single_runner(
+            folder_path=folder_path,
+            report_dir=report_dir,
+            llm_key_config=llm_key_config,
+            lease_duration_sec=max(300.0, float(args.lease_hours) * 3600.0),
+            worker_mode=bool(args.worker_mode),
+        )
+        if not args.worker_mode and exit_code == RUNNER_KEY_UNAVAILABLE_EXIT_CODE:
+            exit_code = 2
+        sys.exit(exit_code)
 
-    if not apk_files:
-        print("No APK files found in the folder.")
-        sys.exit(0)
-
-    state_db = AnalysisStateDB(os.path.join(report_dir, "analysis_state.sqlite"))
-    master_log_path = os.path.join(report_dir, "master_summary.log")
-    run_counts = {"done": 0, "failed": 0, "corrupt": 0, "skipped": 0}
-
-    with open(master_log_path, "a", encoding="utf-8") as master_log:
-        for apk_file in apk_files:
-            apk_path = os.path.join(folder_path, apk_file)
-            print(f"\n[📦 Processing APK: {apk_file}]")
-            status = analyze_sample_with_state(
-                apk_path=apk_path,
-                report_dir=report_dir,
-                state_db=state_db,
-                master_log=master_log,
-            )
-            if status == "halted_failed":
-                run_counts["failed"] += 1
-                print("[halt] stopping analysis run because LLM requests failed after retries")
-                break
-            if status in run_counts:
-                run_counts[status] += 1
-            else:
-                run_counts["skipped"] += 1
-
-    counts = state_db.status_counts()
-    summary_payload = {
-        "counts": counts,
-        "run_counts": run_counts,
-    }
-    write_json(os.path.join(report_dir, "analysis_run_summary.json"), summary_payload)
-    state_db.close()
-
-    print(json.dumps(summary_payload, indent=2, ensure_ascii=False))
-    if counts.get("failed", 0) > 0 or counts.get("in_progress", 0) > 0:
-        sys.exit(2)
-    sys.exit(0)
+    exit_code = run_multi_key_parent(
+        folder_path=folder_path,
+        report_dir=report_dir,
+        lease_duration_sec=max(300.0, float(args.lease_hours) * 3600.0),
+        key_configs=key_configs,
+    )
+    sys.exit(exit_code)
 
