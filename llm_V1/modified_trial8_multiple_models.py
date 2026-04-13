@@ -1503,7 +1503,7 @@ def run_single_runner(
 
             for apk_file in apk_files:
                 apk_path = os.path.join(folder_path, apk_file)
-                print(f"\n[runner:{runner_id}] [📦 Processing APK: {apk_file}]")
+                print(f"\n[runner:{runner_id}] [PKG Processing APK: {apk_file}]")
                 status = analyze_sample_with_state(
                     apk_path=apk_path,
                     report_dir=report_dir,

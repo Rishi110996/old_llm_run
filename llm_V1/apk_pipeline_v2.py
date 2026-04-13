@@ -101,22 +101,88 @@ def _extract_facts(apk_path: str, logger: logging.Logger) -> APKFacts:
 # YARA → evidence items
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# YARA rule name → behavior family mapping
+# Rule names follow the convention: Platform_Category_Family_ID
+# We match against lowercase rule name tokens (first match wins per entry).
+# Each entry: (keyword, behavior_tags, strength, direction)
+# ---------------------------------------------------------------------------
+_YARA_CATEGORY_MAP = [
+    # --- Benign ---
+    ("clean",          ["normal_app_behavior"],                          0.70, "benign"),
+    # --- Credential theft / banking ---
+    ("pws",            ["credential_theft"],                             1.00, "malicious"),
+    ("banker",         ["overlay_fraud", "credential_theft", "c2_networking"], 1.00, "malicious"),
+    ("banking",        ["overlay_fraud", "credential_theft", "c2_networking"], 1.00, "malicious"),
+    ("stealer",        ["credential_theft", "data_exfiltration"],        1.00, "malicious"),
+    ("keylog",         ["credential_theft"],                             1.00, "malicious"),
+    ("phish",          ["overlay_fraud", "credential_theft"],            1.00, "malicious"),
+    # --- Spyware / RAT ---
+    ("spyware",        ["data_exfiltration", "call_interception"],       1.00, "malicious"),
+    ("rat",            ["c2_networking", "data_exfiltration"],           1.00, "malicious"),
+    # --- Dropper / downloader / dynamic loading ---
+    ("dropper",        ["dynamic_code_loading", "persistence"],          1.00, "malicious"),
+    ("downloader",     ["dynamic_code_loading"],                         0.90, "malicious"),
+    ("loader",         ["dynamic_code_loading"],                         0.90, "malicious"),
+    ("inject",         ["dynamic_code_loading", "privilege_escalation"], 0.95, "malicious"),
+    # --- Backdoor / C2 ---
+    ("backdoor",       ["c2_networking"],                                1.00, "malicious"),
+    ("c2",             ["c2_networking"],                                1.00, "malicious"),
+    ("bot",            ["c2_networking", "persistence"],                 0.90, "malicious"),
+    # --- Ransomware / locker ---
+    ("ransom",         ["data_exfiltration", "persistence"],             1.00, "malicious"),
+    ("locker",         ["persistence", "privilege_escalation"],          1.00, "malicious"),
+    # --- Privilege escalation / root / exploit ---
+    ("exploit",        ["privilege_escalation"],                         1.00, "malicious"),
+    ("hacktool",       ["privilege_escalation"],                         0.95, "malicious"),
+    ("rootkit",        ["privilege_escalation"],                         1.00, "malicious"),
+    # --- Anti-analysis / obfuscation / packer ---
+    ("packer",         ["anti_analysis"],                                0.90, "malicious"),
+    ("antisandbox",    ["anti_analysis"],                                0.95, "malicious"),
+    ("antivm",         ["anti_analysis"],                                0.95, "malicious"),
+    # --- Ad fraud / PUA ---
+    ("adfraud",        ["ad_analytics_only"],                            0.70, "ambiguous"),
+    ("pua",            ["ad_analytics_only"],                            0.60, "ambiguous"),
+    ("adware",         ["ad_analytics_only"],                            0.70, "ambiguous"),
+    # --- Generic trojan (broad — comes last to not shadow specific ones) ---
+    ("trojan",         ["c2_networking", "data_exfiltration"],           0.85, "malicious"),
+    ("spy",            ["data_exfiltration", "call_interception"],       0.90, "malicious"),
+]
+
+
+def _yara_tags_for_rule(rule_name: str):
+    """Return (behavior_tags, strength, direction) for a YARA rule name."""
+    low = rule_name.lower()
+    for keyword, tags, strength, direction in _YARA_CATEGORY_MAP:
+        if keyword in low:
+            return tags, strength, direction
+    # fallback: unrecognised rule, treat as generic malicious signal
+    return ["anti_analysis"], 0.85, "malicious"
+
+
 def _yara_evidence_items(yara_matches: List[Dict[str, Any]]):
-    """Convert YARA hits to EvidenceItems in-line (avoids circular import)."""
+    """Convert YARA hits to EvidenceItems with per-rule family mapping."""
     from evidence_schema import EvidenceItem, make_evidence_id
     items = []
     for hit in yara_matches:
         rule = str(hit.get("detection_rule", hit.get("rule", "unknown")))
+        tags, strength, direction = _yara_tags_for_rule(rule)
+        if direction == "benign":
+            explanation = f"Known-clean YARA rule matched: {rule}"
+            benign_alts = "Rule is explicitly classified as clean/benign by YARA signature"
+        else:
+            explanation = f"YARA rule matched: {rule}"
+            benign_alts = "None — a named YARA signature match is authoritative"
         items.append(EvidenceItem(
             id=make_evidence_id("yara", rule, "yara"),
             kind="yara",
             value=rule,
             source_location="yara",
-            direction="malicious",
-            strength=1.00,
-            behavior_tags=["anti_analysis"],   # cluster will refine this
-            explanation=f"YARA rule matched: {rule}",
-            benign_alternatives="None — a YARA signature match is authoritative",
+            direction=direction,
+            strength=strength,
+            behavior_tags=tags,
+            explanation=explanation,
+            benign_alternatives=benign_alts,
         ))
     return items
 

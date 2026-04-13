@@ -470,10 +470,11 @@ class APKAnalyzer:
             score = 0.0
             tags: List[str] = []
 
-            # obfuscation heuristics
+            # obfuscation heuristics — two-tier method-name ratio
             short_name = cls_name.split("/")[-1].rstrip(";")
-            if len(short_name) <= 2:
-                score += 0.20
+            cls_name_short = len(short_name) <= 2
+            if cls_name_short:
+                score += 0.15    # reduced from 0.20; ProGuard does this on benign apps too
                 tags.append("anti_analysis")
 
             methods = list(class_obj.get_methods())
@@ -481,8 +482,18 @@ class APKAnalyzer:
                 short_method_count = sum(
                     1 for m in methods if len(m.name) <= 2 and not m.name.startswith("<")
                 )
-                if short_method_count / len(methods) > 0.70:
-                    score += 0.30
+                ratio = short_method_count / len(methods)
+                if ratio > 0.90:
+                    # Near-complete renaming — almost certainly intentional obfuscation
+                    score += 0.35
+                    tags.append("anti_analysis")
+                elif ratio > 0.70:
+                    # Strong obfuscation
+                    score += 0.20
+                    tags.append("anti_analysis")
+                elif ratio > 0.50:
+                    # Moderate — possible benign ProGuard, small signal only
+                    score += 0.08
                     tags.append("anti_analysis")
 
             # sensitive API calls (xref_to = classes this class references)
