@@ -316,6 +316,7 @@ def run(
     *,
     use_smba: bool = False,
     vt_api_key: Optional[str] = None,
+    no_vt_detection: bool = False,
 ) -> Dict[str, Any]:
     """
     Run the v2 pipeline.  Returns a verdict dict matching the v1 schema:
@@ -323,8 +324,10 @@ def run(
        Risk-Score: int, Summary: str, IOCs: [str]}
 
     Optional enrichment flags:
-      use_smba    — query Zscaler SMBA sandbox (requires smba_data_pull/.env)
-      vt_api_key  — query VT behaviours endpoint (falls back to config.yaml key if None)
+      use_smba         — query Zscaler SMBA sandbox (requires smba_data_pull/.env)
+      vt_api_key       — query VT behaviours endpoint (falls back to config.yaml key if None)
+      no_vt_detection  — skip vt_detection / vt_threat_label items; keeps traffic/PCAP.
+                         Use when batch-analysing VT-sourced samples where detection is known.
     """
     from modified_trial8_multiple_models import call_llm, normalize_final_verdict, safe_log
 
@@ -367,9 +370,14 @@ def run(
         logger.info("[pipeline_v2] SMBA: %d item(s) added", len(smba_items))
 
     if vt_api_key is not None and _sha256:
-        logger.info("[pipeline_v2] Stage 1c: VT behaviour enrichment (sha256=%s…)", _sha256[:16])
+        logger.info("[pipeline_v2] Stage 1c: VT behaviour enrichment (sha256=%s%s)\u2026",
+                    _sha256[:16], "  [no-vt-detection]" if no_vt_detection else "")
         pcap_dir = os.path.join(os.path.dirname(os.path.abspath(apk_path)), "pcaps")
-        vt_items = vt_enrichment.enrich_from_vt(_sha256, vt_api_key, logger, pcap_save_dir=pcap_dir)
+        vt_items = vt_enrichment.enrich_from_vt(
+            _sha256, vt_api_key, logger,
+            pcap_save_dir=pcap_dir,
+            skip_detection=no_vt_detection,
+        )
         evidence_items.extend(vt_items)
         logger.info("[pipeline_v2] VT: %d item(s) added", len(vt_items))
 

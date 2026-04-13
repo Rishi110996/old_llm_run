@@ -298,10 +298,14 @@ def _items_from_file_report(
     attrs: Dict[str, Any],
     sha256: str,
     logger: logging.Logger,
+    skip_detection: bool = False,
 ) -> list:
     """
     Extract high-value EvidenceItems from the VT /files/{sha256} report attributes.
     Covers: AV detection ratio, suggested threat label, certificate cross-check.
+
+    skip_detection: if True, omits vt_detection and vt_threat_label items.
+    Use this when analysing VT-sourced samples where detection is already known.
     Returns [] silently on any issue (does not raise).
     """
     EvidenceItem, make_evidence_id = _ei()
@@ -314,7 +318,7 @@ def _items_from_file_report(
     harmless   = stats.get("harmless", 0)
     undetected = stats.get("undetected", 0)
     total = malicious + suspicious + harmless + undetected
-    if total > 0:
+    if total > 0 and not skip_detection:
         ratio = (malicious + suspicious) / total
         if ratio >= 0.30:
             direction, strength = "malicious", min(0.95, 0.55 + ratio)
@@ -345,7 +349,7 @@ def _items_from_file_report(
     # ── 2. Suggested threat label (AV consensus family name) ─────────────
     ptc = attrs.get("popular_threat_classification", {})
     label = ptc.get("suggested_threat_label", "")  # e.g. "trojan.bankbot/fuad"
-    if label:
+    if label and not skip_detection:
         # Map generic threat category words to behavior tags
         label_lower = label.lower()
         if any(w in label_lower for w in ("banker", "bankbot", "bank")):
@@ -443,6 +447,7 @@ def enrich_from_vt(
     vt_api_key: Optional[str],
     logger: logging.Logger,
     pcap_save_dir: Optional[str] = None,
+    skip_detection: bool = False,
 ) -> list:
     """
     Query VT /files/{sha256}/behaviours for network IOCs and download PCAP if available.
@@ -450,6 +455,9 @@ def enrich_from_vt(
 
     If vt_api_key is None, falls back to the premium key in vt_apk_downloader/config.yaml.
     pcap_save_dir: directory to save PCAP files. Defaults to a 'pcaps' folder next to this module.
+    skip_detection: omit vt_detection and vt_threat_label items. Use when analysing
+                    VT-sourced samples where the detection verdict is already known,
+                    to avoid double-counting AV signals in the score.
     """
     try:
         import requests
@@ -511,7 +519,7 @@ def enrich_from_vt(
     if resp_file is not None and resp_file.ok:
         try:
             file_attrs = resp_file.json()["data"]["attributes"]
-            items.extend(_items_from_file_report(file_attrs, sha256, logger))
+            items.extend(_items_from_file_report(file_attrs, sha256, logger, skip_detection=skip_detection))
         except Exception as exc:
             logger.warning("[vt] file report parse error: %s", exc)
     elif resp_file is not None and resp_file.status_code == 404:

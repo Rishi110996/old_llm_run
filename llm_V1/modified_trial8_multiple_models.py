@@ -1277,6 +1277,7 @@ def analyze_apk_pipeline(apk_path, logger, llm_client: OpenAI):
         llm_client,
         use_smba=_USE_SMBA,
         vt_api_key=_VT_API_KEY,
+        no_vt_detection=_NO_VT_DETECTION,
     )
 
 
@@ -1746,11 +1747,20 @@ if __name__ == "__main__":
             "Uses the premium key from vt_apk_downloader/config.yaml automatically."
         ),
     )
+    parser.add_argument(
+        "--no-vt-detection",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip VT detection-ratio and threat-label evidence items. "
+            "Keeps PCAP/traffic/IDS/MITRE data. "
+            "Use when batch-analysing VT-sourced samples where the verdict is already known."
+        ),
+    )
     args = parser.parse_args()
-
-    # Set module-level enrichment flags so analyze_apk_pipeline() picks them up.
-    global _USE_SMBA, _VT_API_KEY
+    global _USE_SMBA, _VT_API_KEY, _NO_VT_DETECTION
     _USE_SMBA = bool(args.use_smba)
+    _NO_VT_DETECTION = bool(args.no_vt_detection)
     if args.vt_enrich:
         import vt_enrichment as _vt_mod
         _VT_API_KEY = _vt_mod.load_vt_api_key_from_config()
