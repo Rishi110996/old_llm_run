@@ -1500,6 +1500,7 @@ def write_run_summary(
     run_counts: Dict[str, int],
     runner_id: Optional[str] = None,
     llm_key_name: Optional[str] = None,
+    worker_pid: Optional[int] = None,
     output_name: str = "analysis_run_summary.json",
 ) -> Dict[str, Any]:
     summary_payload: Dict[str, Any] = {
@@ -1510,8 +1511,26 @@ def write_run_summary(
         summary_payload["runner_id"] = runner_id
     if llm_key_name:
         summary_payload["llm_key_name"] = llm_key_name
+    if worker_pid is not None:
+        summary_payload["worker_pid"] = int(worker_pid)
     write_json(os.path.join(report_dir, output_name), summary_payload)
     return summary_payload
+
+
+def write_worker_launch_manifest(
+    report_dir: str,
+    *,
+    worker_launches: List[Dict[str, Any]],
+    lease_duration_sec: float,
+) -> Dict[str, Any]:
+    payload = {
+        "started_at_utc": utc_now_iso(),
+        "expected_worker_count": len(worker_launches),
+        "lease_duration_sec": float(lease_duration_sec),
+        "workers": worker_launches,
+    }
+    write_json(os.path.join(report_dir, "worker_launch_manifest.json"), payload)
+    return payload
 
 
 def run_single_runner(
@@ -1543,6 +1562,11 @@ def run_single_runner(
 
     print(f"[runner:{runner_id}] starting with key={llm_key_config.name}")
     with open(master_log_path, "a", encoding="utf-8") as master_log:
+        master_log.write(
+            f"# runner_start runner_id={runner_id} key={llm_key_config.name} pid={os.getpid()} "
+            f"started_at={utc_now_iso()}\n"
+        )
+        master_log.flush()
         while True:
             pass_completed = 0
             pass_contended = 0
@@ -1594,10 +1618,16 @@ def run_single_runner(
                     run_counts=run_counts,
                     runner_id=runner_id,
                     llm_key_name=llm_key_config.name,
+                    worker_pid=os.getpid(),
                     output_name=summary_name if worker_mode else "analysis_run_summary.json",
                 )
                 summary_payload["key_disabled"] = True
                 write_json(os.path.join(report_dir, summary_name if worker_mode else "analysis_run_summary.json"), summary_payload)
+                master_log.write(
+                    f"# runner_stop runner_id={runner_id} key={llm_key_config.name} pid={os.getpid()} "
+                    f"stopped_at={utc_now_iso()} reason=key_unavailable\n"
+                )
+                master_log.flush()
                 state_db.close()
                 print(json.dumps(summary_payload, indent=2, ensure_ascii=False))
                 return RUNNER_KEY_UNAVAILABLE_EXIT_CODE
@@ -1627,8 +1657,14 @@ def run_single_runner(
         run_counts=run_counts,
         runner_id=runner_id,
         llm_key_name=llm_key_config.name,
+        worker_pid=os.getpid(),
         output_name=summary_name,
     )
+    with open(master_log_path, "a", encoding="utf-8") as master_log:
+        master_log.write(
+            f"# runner_stop runner_id={runner_id} key={llm_key_config.name} pid={os.getpid()} "
+            f"stopped_at={utc_now_iso()} reason=completed\n"
+        )
     state_db.close()
     print(json.dumps(summary_payload, indent=2, ensure_ascii=False))
     if counts.get("failed", 0) > 0 or counts.get("in_progress", 0) > 0:
@@ -1644,6 +1680,12 @@ def run_multi_key_parent(
     key_configs: List[LLMKeyConfig],
 ) -> int:
     worker_procs: List[Tuple[LLMKeyConfig, subprocess.Popen]] = []
+    worker_launches: List[Dict[str, Any]] = []
+
+    print(
+        f"[parent] launching {len(key_configs)} worker(s) for keys: "
+        f"{', '.join(key.name for key in key_configs)}"
+    )
     for key_config in key_configs:
         cmd = [
             sys.executable,
@@ -1660,6 +1702,23 @@ def run_multi_key_parent(
         print(f"[parent] starting worker for key={key_config.name}: {' '.join(cmd)}")
         proc = subprocess.Popen(cmd, cwd=SCRIPT_DIR)
         worker_procs.append((key_config, proc))
+        worker_launch = {
+            "llm_key_name": key_config.name,
+            "worker_pid": int(proc.pid),
+            "command": cmd,
+            "started_at_utc": utc_now_iso(),
+        }
+        worker_launches.append(worker_launch)
+        print(
+            f"[parent] worker_started key={key_config.name} pid={proc.pid} "
+            f"report_dir={report_dir}"
+        )
+
+    write_worker_launch_manifest(
+        report_dir,
+        worker_launches=worker_launches,
+        lease_duration_sec=lease_duration_sec,
+    )
 
     worker_results: List[Dict[str, Any]] = []
     highest_rc = 0
@@ -1667,7 +1726,13 @@ def run_multi_key_parent(
     for key_config, proc in worker_procs:
         rc = int(proc.wait())
         highest_rc = max(highest_rc, rc)
-        worker_results.append({"llm_key_name": key_config.name, "exit_code": rc})
+        worker_results.append(
+            {
+                "llm_key_name": key_config.name,
+                "worker_pid": int(proc.pid),
+                "exit_code": rc,
+            }
+        )
         if rc == RUNNER_KEY_UNAVAILABLE_EXIT_CODE:
             disabled_key_count += 1
         print(f"[parent] worker key={key_config.name} exited with code {rc}")
@@ -1681,6 +1746,9 @@ def run_multi_key_parent(
         counts=counts,
         run_counts={"done": 0, "failed": 0, "corrupt": 0, "skipped": 0},
     )
+    summary_payload["configured_keys"] = [key.name for key in key_configs]
+    summary_payload["expected_worker_count"] = len(key_configs)
+    summary_payload["launched_worker_count"] = len(worker_launches)
     summary_payload["worker_results"] = worker_results
     summary_payload["disabled_key_count"] = disabled_key_count
     summary_payload["all_keys_unavailable"] = disabled_key_count == len(key_configs)
@@ -1735,6 +1803,11 @@ if __name__ == "__main__":
             "No LLM API keys configured in llm_V1/config.json. "
             "Add api_key_zllama or llm_api_keys before running analysis."
         )
+
+    print(
+        f"[startup] loaded {len(key_configs)} LLM key(s): "
+        f"{', '.join(key.name for key in key_configs)}"
+    )
 
     if args.worker_mode or args.llm_key_name or len(key_configs) == 1:
         llm_key_config = pick_llm_key_config(args.llm_key_name, config)
