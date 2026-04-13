@@ -348,7 +348,10 @@ def run(
     logger.info("[pipeline_v2] %d evidence items after normalization", len(evidence_items))
 
     # ── Stage 1b/c (optional): sandbox enrichment ────────────────────────
-    _needs_sha256 = use_smba or (vt_api_key is not None or vt_enrichment.load_vt_api_key_from_config())
+    # NOTE: sha256 is only computed when at least one enrichment source is active.
+    # VT runs only when vt_api_key was explicitly provided by the caller
+    # (set via --vt-enrich flag in the CLI); it does NOT auto-load from config here.
+    _needs_sha256 = use_smba or vt_api_key is not None
     if _needs_sha256:
         import hashlib
         _sha256 = hashlib.sha256(open(apk_path, "rb").read()).hexdigest()
@@ -363,9 +366,10 @@ def run(
         evidence_items.extend(smba_items)
         logger.info("[pipeline_v2] SMBA: %d item(s) added", len(smba_items))
 
-    if _sha256 and (vt_api_key is not None or vt_enrichment.load_vt_api_key_from_config()):
+    if vt_api_key is not None and _sha256:
         logger.info("[pipeline_v2] Stage 1c: VT behaviour enrichment (sha256=%s…)", _sha256[:16])
-        vt_items = vt_enrichment.enrich_from_vt(_sha256, vt_api_key, logger)
+        pcap_dir = os.path.join(os.path.dirname(os.path.abspath(apk_path)), "pcaps")
+        vt_items = vt_enrichment.enrich_from_vt(_sha256, vt_api_key, logger, pcap_save_dir=pcap_dir)
         evidence_items.extend(vt_items)
         logger.info("[pipeline_v2] VT: %d item(s) added", len(vt_items))
 

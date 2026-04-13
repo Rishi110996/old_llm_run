@@ -22,7 +22,7 @@ _VT_BASE = "https://www.virustotal.com/api/v3"
 _BEHAVIOURS_EP = _VT_BASE + "/files/{sha256}/behaviours"
 _PCAP_EP       = _VT_BASE + "/file_behaviours/{sandbox_id}/pcap"
 
-# ── Quick triage patterns (same as smba_enrichment) ──────────────────────────
+# ── Quick triage patterns ────────────────────────────────────────────────────
 _SUSPICIOUS_TLD = re.compile(
     r"\b[a-z0-9-]+\.(?:ru|cn|su|top|tk|pw|xyz|kim|click|info|biz|cc)\b", re.I
 )
@@ -30,18 +30,55 @@ _IP_URL  = re.compile(r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", re.I)
 _RAW_IP  = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
 _PHP_URL = re.compile(r"https?://[^\s\"']{10,}\.php", re.I)
 
-# ── MITRE ATT&CK tactic → behavior family mapping ────────────────────────────
-_MITRE_TACTIC_MAP = {
-    "collection":            (["data_exfiltration"],           0.75, "malicious"),
-    "command-and-control":   (["c2_networking"],               0.85, "malicious"),
-    "credential-access":     (["credential_theft"],            0.85, "malicious"),
-    "defense-evasion":       (["anti_analysis"],               0.75, "malicious"),
-    "discovery":             (["anti_analysis"],               0.50, "ambiguous"),
-    "execution":             (["dynamic_code_loading"],        0.70, "malicious"),
-    "exfiltration":          (["data_exfiltration"],           0.85, "malicious"),
-    "impact":                (["persistence"],                 0.80, "malicious"),
-    "persistence":           (["persistence"],                 0.75, "malicious"),
-    "privilege-escalation":  (["privilege_escalation"],        0.85, "malicious"),
+# Ports that are benign by convention; anything else on a raw IP is suspicious
+_BENIGN_PORTS = {80, 443, 8080, 8443, 53, 123}
+
+# ── MITRE ATT&CK T-code → (behavior_tags, strength, direction) ───────────────
+# Keyed by technique-id prefix (covers subtechniques via startswith match)
+_MITRE_TCODE_MAP = {
+    # Collection
+    "T1429": (["data_exfiltration"],                       0.80, "malicious"),  # Capture Audio
+    "T1430": (["data_exfiltration"],                       0.75, "malicious"),  # Location Tracking
+    "T1513": (["data_exfiltration"],                       0.90, "malicious"),  # Screen Capture
+    "T1636": (["data_exfiltration", "call_interception"],  0.80, "malicious"),  # Contact/Call/SMS
+    # Credential Access
+    "T1411": (["overlay_fraud", "credential_theft"],       0.90, "malicious"),  # Input Prompt
+    "T1417": (["credential_theft"],                        0.90, "malicious"),  # Input Capture
+    # C2 / Network
+    "T1071": (["c2_networking"],                           0.70, "malicious"),  # App Layer Protocol
+    "T1095": (["c2_networking"],                           0.80, "malicious"),  # Non-App Layer Proto
+    "T1571": (["c2_networking"],                           0.85, "malicious"),  # Non-Standard Port
+    "T1573": (["c2_networking", "anti_analysis"],          0.70, "malicious"),  # Encrypted Channel
+    "T1437": (["c2_networking"],                           0.65, "malicious"),  # App Layer Proto
+    "T1481": (["c2_networking"],                           0.70, "malicious"),  # Web Service abuse
+    # Exfiltration
+    "T1041": (["data_exfiltration", "c2_networking"],      0.85, "malicious"),  # Exfil over C2
+    "T1532": (["data_exfiltration"],                       0.80, "malicious"),  # Data Encrypted
+    # Defense Evasion
+    "T1406": (["anti_analysis"],                           0.80, "malicious"),  # Obfuscated Files
+    "T1418": (["anti_analysis"],                           0.55, "ambiguous"),  # Software Discovery
+    "T1661": (["anti_analysis"],                           0.70, "malicious"),  # App Versioning
+    # Execution
+    "T1407": (["dynamic_code_loading"],                    0.90, "malicious"),  # Download New Code
+    "T1059": (["dynamic_code_loading"],                    0.80, "malicious"),  # Command & Scripting
+    # Persistence
+    "T1402": (["persistence"],                             0.75, "malicious"),  # Broadcast Receivers
+    "T1603": (["persistence"],                             0.75, "malicious"),  # Scheduled Task
+    "T1624": (["persistence"],                             0.75, "malicious"),  # Event Triggered Exec
+    # Privilege Escalation
+    "T1404": (["privilege_escalation"],                    0.90, "malicious"),  # Exploit PE
+    "T1626": (["privilege_escalation"],                    0.85, "malicious"),  # Abuse Elevation
+    # Accessibility abuse (Android-specific)
+    "T1616": (["accessibility_abuse"],                     0.90, "malicious"),  # Call Control
+    "T1517": (["accessibility_abuse"],                     0.85, "malicious"),  # Access Notifications
+}
+
+# ── IDS alert severity → (strength, direction) ────────────────────────────────
+_IDS_SEVERITY_MAP = {
+    "critical": (0.90, "malicious"),
+    "high":     (0.80, "malicious"),
+    "medium":   (0.60, "ambiguous"),
+    "low":      (0.40, "ambiguous"),
 }
 
 
@@ -86,16 +123,48 @@ def _triage_value(value: str):
     return "ambiguous", 0.35, "Network endpoint"
 
 
-def _add_network_items(
-    values: List[str],
-    source_detail: str,
-    sandbox_name: str,
+def _items_from_sandbox_report(
+    sandbox: Dict[str, Any],
     seen: set,
     items: list,
     logger: logging.Logger,
 ) -> None:
+    """Extract network IOCs from a single VT sandbox report (Zenbox Android field layout)."""
     EvidenceItem, make_evidence_id = _ei()
-    for raw in values:
+    attrs = sandbox.get("attributes", {})
+    sandbox_name = attrs.get("sandbox_name", "unknown")
+
+    # ── IP traffic (actual field: ip_traffic) ────────────────────────────
+    for entry in attrs.get("ip_traffic", []):
+        ip  = str(entry.get("destination_ip") or "").strip()
+        port = entry.get("destination_port", 443)
+        proto = entry.get("transport_layer_protocol", "TCP")
+        if not ip or ip in seen:
+            continue
+        seen.add(ip)
+        # Non-standard port on a direct IP is a strong C2 signal
+        if port not in _BENIGN_PORTS:
+            direction, strength = "malicious", 0.90
+            explanation = (f"Direct IP connection to {ip}:{port}/{proto} on non-standard port "
+                           f"observed in VT sandbox '{sandbox_name}'")
+        else:
+            direction, strength = _triage_value(ip)[0], _triage_value(ip)[1]
+            explanation = (f"Direct IP connection to {ip}:{port}/{proto} "
+                           f"observed in VT sandbox '{sandbox_name}'")
+        items.append(EvidenceItem(
+            id=make_evidence_id("vt_traffic", f"{ip}:{port}", "virustotal"),
+            kind="vt_traffic",
+            value=f"{ip}:{port}",
+            source_location=f"vt_sandbox:{sandbox_name}:ip_traffic",
+            direction=direction,
+            strength=strength,
+            behavior_tags=["c2_networking"],
+            explanation=explanation,
+            benign_alternatives="CDN, analytics, or update endpoints",
+        ))
+
+    # ── Memory pattern domains (actual field: memory_pattern_domains) ────
+    for raw in attrs.get("memory_pattern_domains", []):
         val = str(raw).strip()
         if not val or val in seen:
             continue
@@ -105,96 +174,168 @@ def _add_network_items(
             id=make_evidence_id("vt_traffic", val, "virustotal"),
             kind="vt_traffic",
             value=val,
-            source_location=f"vt_sandbox:{sandbox_name}:{source_detail}",
+            source_location=f"vt_sandbox:{sandbox_name}:memory_pattern_domains",
             direction=direction,
             strength=strength,
             behavior_tags=["c2_networking"],
-            explanation=f"{detail} observed in VT sandbox '{sandbox_name}' ({source_detail}): {val}",
-            benign_alternatives="CDN, analytics, or SDK traffic",
+            explanation=f"{detail} found in memory patterns in VT sandbox '{sandbox_name}': {val}",
+            benign_alternatives="SDK, CDN, or analytics domain",
         ))
 
-
-def _items_from_sandbox_report(
-    sandbox: Dict[str, Any],
-    seen: set,
-    items: list,
-    logger: logging.Logger,
-) -> None:
-    """Extract network IOCs from a single VT sandbox report."""
-    attrs = sandbox.get("attributes", {})
-    sandbox_name = attrs.get("sandbox_name", "unknown")
-
-    # DNS resolutions
-    dns_list = attrs.get("dns_lookups", [])
-    dns_values = [
-        d.get("hostname") or d if isinstance(d, str) else ""
-        for d in dns_list
-    ]
-    _add_network_items([v for v in dns_values if v], "dns", sandbox_name, seen, items, logger)
-
-    # IP traffic
-    net_list = attrs.get("network_communications", [])
-    ip_values = [n.get("destination_ip") or n.get("remote_address") or "" for n in net_list]
-    _add_network_items([v for v in ip_values if v], "ip", sandbox_name, seen, items, logger)
-
-    # HTTP(S) requests
-    http_list = attrs.get("http_conversations", [])
-    http_values = [
-        h.get("url") or h.get("request_method", "") + " " + h.get("host", "")
-        for h in http_list
-    ]
-    _add_network_items([v.strip() for v in http_values if v.strip()], "http", sandbox_name, seen, items, logger)
-
-    # MITRE ATT&CK tactics
-    EvidenceItem, make_evidence_id = _ei()
-    mitre_list = attrs.get("mitre_attack_techniques", []) or attrs.get("tactics", [])
-    for t in mitre_list:
-        tactic = ""
-        if isinstance(t, dict):
-            tactic = (t.get("tactic") or t.get("name") or "").lower().replace(" ", "-")
-        elif isinstance(t, str):
-            tactic = t.lower().replace(" ", "-")
-        mapping = _MITRE_TACTIC_MAP.get(tactic)
-        if not mapping:
+    # ── Memory pattern URLs (actual field: memory_pattern_urls) ──────────
+    for raw in attrs.get("memory_pattern_urls", []):
+        val = str(raw).strip()
+        if not val or val in seen:
             continue
-        tags, strength, direction = mapping
-        key = f"mitre:{tactic}"
+        # Skip well-known benign schema/SDK URLs
+        if "schema" in val.lower() or "android.com" in val.lower():
+            continue
+        seen.add(val)
+        direction, strength, detail = _triage_value(val)
+        items.append(EvidenceItem(
+            id=make_evidence_id("vt_traffic", val, "virustotal"),
+            kind="vt_traffic",
+            value=val,
+            source_location=f"vt_sandbox:{sandbox_name}:memory_pattern_urls",
+            direction=direction,
+            strength=strength,
+            behavior_tags=["c2_networking"],
+            explanation=f"{detail} found in memory pattern URLs in VT sandbox '{sandbox_name}': {val}",
+            benign_alternatives="SDK or library endpoint",
+        ))
+
+    # ── IDS alerts (Suricata/ET rules) ────────────────────────────────────
+    for alert in attrs.get("ids_alerts", []):
+        severity = str(alert.get("alert_severity") or "low").lower()
+        rule_msg = alert.get("rule_msg") or ""
+        rule_cat = alert.get("rule_category") or ""
+        ctx = alert.get("alert_context") or {}
+        dest_ip = ctx.get("dest_ip") or ctx.get("destination_ip") or ""
+        src_ip  = ctx.get("src_ip") or ctx.get("source_ip") or ""
+        ioc_ip  = dest_ip or src_ip
+
+        strength, direction = _IDS_SEVERITY_MAP.get(severity, (0.40, "ambiguous"))
+
+        # Escalate anything tagged trojan/malware/rat/bot by ET
+        if any(w in rule_msg.lower() for w in ("trojan", "malware", "rat", "bot", "c2", "c&c", "backdoor")):
+            direction, strength = "malicious", max(strength, 0.85)
+        if any(w in rule_cat.lower() for w in ("trojan", "malware")):
+            direction, strength = "malicious", max(strength, 0.85)
+
+        key = f"ids:{rule_msg[:40]}"
         if key in seen:
             continue
         seen.add(key)
+
+        value = f"{rule_msg} [{ioc_ip}]" if ioc_ip else rule_msg
         items.append(EvidenceItem(
-            id=make_evidence_id("vt_mitre", tactic, "virustotal"),
+            id=make_evidence_id("vt_ids", key, "virustotal"),
+            kind="vt_ids_alert",
+            value=value,
+            source_location=f"vt_sandbox:{sandbox_name}:ids_alerts",
+            direction=direction,
+            strength=strength,
+            behavior_tags=["c2_networking"],
+            explanation=f"IDS rule triggered in VT sandbox '{sandbox_name}' ({severity}): {rule_msg}",
+            benign_alternatives="False positive Suricata rule on legitimate traffic",
+        ))
+
+        # Also add the dest IP from the IDS alert context as its own IOC
+        if ioc_ip and ioc_ip not in seen:
+            seen.add(ioc_ip)
+            d2, s2, det2 = _triage_value(ioc_ip)
+            items.append(EvidenceItem(
+                id=make_evidence_id("vt_traffic", ioc_ip, "virustotal"),
+                kind="vt_traffic",
+                value=ioc_ip,
+                source_location=f"vt_sandbox:{sandbox_name}:ids_alert_context",
+                direction=direction,
+                strength=strength,
+                behavior_tags=["c2_networking"],
+                explanation=f"IP from IDS alert in VT sandbox '{sandbox_name}': {rule_msg}",
+                benign_alternatives="CDN or analytics IP",
+            ))
+
+    # ── MITRE ATT&CK techniques (field: mitre_attack_techniques, uses T-codes) ─
+    for t in attrs.get("mitre_attack_techniques", []):
+        tid = (t.get("id") or "").upper() if isinstance(t, dict) else str(t).upper()
+        if not tid:
+            continue
+        # Match by prefix (covers subtechniques T1636.001 etc.)
+        mapping = None
+        for prefix, m in _MITRE_TCODE_MAP.items():
+            if tid.startswith(prefix):
+                mapping = m
+                break
+        if not mapping:
+            continue
+        key = f"mitre:{tid}"
+        if key in seen:
+            continue
+        seen.add(key)
+        tags, strength, direction = mapping
+        desc = t.get("signature_description", "") if isinstance(t, dict) else ""
+        items.append(EvidenceItem(
+            id=make_evidence_id("vt_mitre", tid, "virustotal"),
             kind="vt_mitre",
-            value=f"MITRE ATT&CK tactic: {tactic}",
+            value=f"MITRE {tid}: {desc}",
             source_location=f"vt_sandbox:{sandbox_name}:mitre",
             direction=direction,
             strength=strength,
             behavior_tags=tags,
-            explanation=f"VT sandbox '{sandbox_name}' mapped tactic: {tactic}",
-            benign_alternatives="None",
+            explanation=f"VT sandbox '{sandbox_name}' mapped to MITRE {tid}: {desc}",
+            benign_alternatives="None — MITRE mapping based on observed sandbox behavior",
         ))
 
-    # PCAP availability log
-    sandbox_id = sandbox.get("id", "")
-    has_evaded = attrs.get("has_evaded", True)
-    if sandbox_id and not has_evaded:
-        logger.info(
-            "[vt] PCAP may be available for sandbox '%s' (id=%s) — not evaded",
-            sandbox_name,
-            sandbox_id,
+
+def _download_pcap(
+    sandbox_id: str,
+    sha256: str,
+    vt_api_key: str,
+    save_dir: str,
+    logger: logging.Logger,
+) -> Optional[str]:
+    """Download the PCAP for a sandbox report and save it to save_dir.
+    Returns the saved file path, or None on failure."""
+    import requests
+    save_path = os.path.join(save_dir, f"{sha256[:16]}_{sandbox_id.split('_')[-1].replace(' ', '_')}.pcap")
+    if os.path.isfile(save_path):
+        logger.info("[vt] PCAP already exists: %s", save_path)
+        return save_path
+    try:
+        r = requests.get(
+            _PCAP_EP.format(sandbox_id=sandbox_id),
+            headers={"x-apikey": vt_api_key, "Accept": "application/octet-stream"},
+            timeout=120,
+            stream=True,
         )
+        if not r.ok:
+            logger.warning("[vt] PCAP download failed: HTTP %d for %s", r.status_code, sandbox_id)
+            return None
+        os.makedirs(save_dir, exist_ok=True)
+        with open(save_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
+        size_kb = os.path.getsize(save_path) // 1024
+        logger.info("[vt] PCAP saved: %s (%d KB)", save_path, size_kb)
+        return save_path
+    except Exception as exc:
+        logger.warning("[vt] PCAP download error: %s", exc)
+        return None
 
 
 def enrich_from_vt(
     sha256: str,
     vt_api_key: Optional[str],
     logger: logging.Logger,
+    pcap_save_dir: Optional[str] = None,
 ) -> list:
     """
-    Query VT /files/{sha256}/behaviours for network IOCs.
+    Query VT /files/{sha256}/behaviours for network IOCs and download PCAP if available.
     Returns a list of EvidenceItems, or [] on any failure.
 
     If vt_api_key is None, falls back to the premium key in vt_apk_downloader/config.yaml.
+    pcap_save_dir: directory to save PCAP files. Defaults to a 'pcaps' folder next to this module.
     """
     try:
         import requests
@@ -246,8 +387,34 @@ def enrich_from_vt(
     items: list = []
     seen: set = set()
 
+    if pcap_save_dir is None:
+        pcap_save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pcaps")
+
     for sandbox in sandboxes:
         _items_from_sandbox_report(sandbox, seen, items, logger)
 
-    logger.info("[vt] %d evidence items from VT behaviours (%d sandbox reports)", len(items), len(sandboxes))
+        # Download PCAP if available for this sandbox
+        attrs = sandbox.get("attributes", {})
+        sandbox_id = sandbox.get("id", "")
+        sandbox_name = attrs.get("sandbox_name", "unknown")
+        if attrs.get("has_pcap") and sandbox_id:
+            pcap_path = _download_pcap(sandbox_id, sha256, vt_api_key, pcap_save_dir, logger)
+            if pcap_path:
+                EvidenceItem, make_evidence_id = _ei()
+                items.append(EvidenceItem(
+                    id=make_evidence_id("vt_pcap", sandbox_id, "virustotal"),
+                    kind="vt_pcap",
+                    value=f"PCAP captured: {os.path.basename(pcap_path)}",
+                    source_location=f"vt_sandbox:{sandbox_name}:pcap",
+                    direction="ambiguous",
+                    strength=0.10,
+                    behavior_tags=["c2_networking"],
+                    explanation=(f"Full network PCAP from VT sandbox '{sandbox_name}' saved to: "
+                                 f"{pcap_path} ({os.path.getsize(pcap_path)//1024} KB)"),
+                    benign_alternatives="PCAP is raw capture — evidence strength from IP/IDS items above",
+                ))
+        elif sandbox_id and attrs.get("has_pcap") is False:
+            logger.debug("[vt] no PCAP for sandbox '%s'", sandbox_name)
+
+    logger.info("[vt] %d evidence items from VT behaviours (%d sandbox report(s))", len(items), len(sandboxes))
     return items
