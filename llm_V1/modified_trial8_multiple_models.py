@@ -39,6 +39,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 _RUNTIME_CONFIG_CACHE: Optional[Dict[str, Any]] = None
 
+# ── Runtime enrichment flags (set from CLI args at startup) ──────────────────
+_USE_SMBA: bool = False
+_VT_API_KEY: Optional[str] = None
+
 
 @dataclass(frozen=True)
 class LLMKeyConfig:
@@ -1264,8 +1268,16 @@ def final_llm_verdict(
 def analyze_apk_pipeline(apk_path, logger, llm_client: OpenAI):
     """
     Thin wrapper — delegates to apk_pipeline_v2.run().
+    Enrichment flags (use_smba, vt_api_key) are read from module-level globals
+    set by the CLI argument parser at startup.
     """
-    return apk_pipeline_v2.run(apk_path, logger, llm_client)
+    return apk_pipeline_v2.run(
+        apk_path,
+        logger,
+        llm_client,
+        use_smba=_USE_SMBA,
+        vt_api_key=_VT_API_KEY,
+    )
 
 
 def isapk(path):
@@ -1716,7 +1728,34 @@ if __name__ == "__main__":
         default=6.0,
         help="How long a sample claim stays valid before another runner may recover it after a crash.",
     )
+    parser.add_argument(
+        "--use-smba",
+        action="store_true",
+        default=False,
+        help=(
+            "Enrich analysis with Zscaler SMBA sandbox data. "
+            "Requires ZSCALER_JSESSIONID to be set in llm_V1/smba_data_pull/.env"
+        ),
+    )
+    parser.add_argument(
+        "--vt-enrich",
+        action="store_true",
+        default=False,
+        help=(
+            "Enrich analysis with VirusTotal behaviour data. "
+            "Uses the premium key from vt_apk_downloader/config.yaml automatically."
+        ),
+    )
     args = parser.parse_args()
+
+    # Set module-level enrichment flags so analyze_apk_pipeline() picks them up.
+    global _USE_SMBA, _VT_API_KEY
+    _USE_SMBA = bool(args.use_smba)
+    if args.vt_enrich:
+        import vt_enrichment as _vt_mod
+        _VT_API_KEY = _vt_mod.load_vt_api_key_from_config()
+        if not _VT_API_KEY:
+            print("[startup] --vt-enrich: no premium VT key found in vt_apk_downloader/config.yaml")
 
     folder_path = args.apk_folder
     if not os.path.isdir(folder_path):

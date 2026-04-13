@@ -27,6 +27,9 @@ from evidence_normalizer import normalize_all
 from behavior_clusterer import build_clusters
 from cluster_scorer import score_all_clusters
 from llm_cluster_reviewer import review_clusters
+import ssdeep_similarity
+import smba_enrichment
+import vt_enrichment
 
 # ---------------------------------------------------------------------------
 # constants
@@ -95,6 +98,17 @@ def _extract_facts(apk_path: str, logger: logging.Logger) -> APKFacts:
         class_behavior_tags=class_behavior_tags,
         yara_matches=yara_matches,
     )
+
+
+def _run_ssdeep(apk_path: str, logger: logging.Logger) -> List:
+    """Compute ssdeep for the APK and compare against the corpus. Returns EvidenceItems."""
+    corpus_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "yara_exports", "ssdeep.json")
+    try:
+        return ssdeep_similarity.match_against_corpus(apk_path, corpus_path, logger)
+    except Exception as exc:
+        logger.warning("[stage0] ssdeep comparison failed: %s", exc)
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -299,11 +313,18 @@ def run(
     apk_path: str,
     logger: logging.Logger,
     llm_client: OpenAI,
+    *,
+    use_smba: bool = False,
+    vt_api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run the v2 pipeline.  Returns a verdict dict matching the v1 schema:
       {Malicious: 0|1, Suspicious: 0|1, Clean: 0|1,
        Risk-Score: int, Summary: str, IOCs: [str]}
+
+    Optional enrichment flags:
+      use_smba    — query Zscaler SMBA sandbox (requires smba_data_pull/.env)
+      vt_api_key  — query VT behaviours endpoint (falls back to config.yaml key if None)
     """
     from modified_trial8_multiple_models import call_llm, normalize_final_verdict, safe_log
 
@@ -311,13 +332,42 @@ def run(
     logger.info("[pipeline_v2] Stage 0: extraction")
     apk_facts = _extract_facts(apk_path, logger)
 
+    # ── Stage 0b: ssdeep corpus comparison ────────────────────────────────
+    logger.info("[pipeline_v2] Stage 0b: ssdeep similarity")
+    ssdeep_items = _run_ssdeep(apk_path, logger)
+    logger.info("[pipeline_v2] ssdeep: %d evidence item(s)", len(ssdeep_items))
+
     # ── Stage 1: evidence normalization ───────────────────────────────────
     logger.info("[pipeline_v2] Stage 1: normalization")
     evidence_items = normalize_all(apk_facts)
 
     # Include YARA items
     evidence_items.extend(_yara_evidence_items(apk_facts.yara_matches))
+    # Include ssdeep items
+    evidence_items.extend(ssdeep_items)
     logger.info("[pipeline_v2] %d evidence items after normalization", len(evidence_items))
+
+    # ── Stage 1b/c (optional): sandbox enrichment ────────────────────────
+    _needs_sha256 = use_smba or (vt_api_key is not None or vt_enrichment.load_vt_api_key_from_config())
+    if _needs_sha256:
+        import hashlib
+        _sha256 = hashlib.sha256(open(apk_path, "rb").read()).hexdigest()
+    else:
+        _sha256 = None
+
+    if use_smba and _sha256:
+        smba_env = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "smba_data_pull", ".env")
+        logger.info("[pipeline_v2] Stage 1b: SMBA enrichment (sha256=%s…)", _sha256[:16])
+        smba_items = smba_enrichment.enrich_from_smba(_sha256, smba_env, logger)
+        evidence_items.extend(smba_items)
+        logger.info("[pipeline_v2] SMBA: %d item(s) added", len(smba_items))
+
+    if _sha256 and (vt_api_key is not None or vt_enrichment.load_vt_api_key_from_config()):
+        logger.info("[pipeline_v2] Stage 1c: VT behaviour enrichment (sha256=%s…)", _sha256[:16])
+        vt_items = vt_enrichment.enrich_from_vt(_sha256, vt_api_key, logger)
+        evidence_items.extend(vt_items)
+        logger.info("[pipeline_v2] VT: %d item(s) added", len(vt_items))
 
     # ── Stage 2: clustering ────────────────────────────────────────────────
     logger.info("[pipeline_v2] Stage 2: clustering")

@@ -191,6 +191,37 @@ class APKAnalyzer:
         "Landroid/app/admin/DevicePolicyManager;": (0.80, ["persistence"]),
         "Landroid/app/AlarmManager;":           (0.35, ["persistence"]),
         "Landroid/app/job/JobScheduler;":       (0.30, ["persistence"]),
+        # app enumeration / overlay timing — banking trojans wait until banking app is foreground
+        "Landroid/content/pm/PackageManager;":  (0.55, ["anti_analysis", "overlay_fraud"]),
+        "Landroid/app/usage/UsageStatsManager;": (0.75, ["anti_analysis", "overlay_fraud"]),
+        "Landroid/app/ActivityManager;":        (0.50, ["anti_analysis"]),
+        # screen capture / recording
+        "Landroid/media/projection/MediaProjectionManager;": (0.90, ["data_exfiltration"]),
+        "Landroid/media/projection/MediaProjection;":        (0.90, ["data_exfiltration"]),
+        "Landroid/media/MediaRecorder;":        (0.65, ["data_exfiltration"]),
+        # clipboard hijacking (crypto address substitution)
+        "Landroid/content/ClipboardManager;":   (0.70, ["credential_theft", "data_exfiltration"]),
+        # hardware key injection / input event manipulation
+        "Landroid/hardware/input/InputManager;": (0.80, ["accessibility_abuse"]),
+        "Landroid/view/inputmethod/InputConnection;": (0.65, ["credential_theft"]),
+        # Bluetooth recon — device fingerprinting and proximity scanning
+        "Landroid/bluetooth/BluetoothAdapter;": (0.40, ["data_exfiltration"]),
+        # Wi-Fi scanning — SSID/BSSID collection for location tracking and network recon
+        "Landroid/net/wifi/WifiManager;":       (0.45, ["data_exfiltration"]),
+        # account credential theft — sync adapter, AccountManager abuse
+        "Landroid/accounts/AccountManager;":    (0.75, ["credential_theft"]),
+        # WebView phishing — malware overlays WebView to capture banking creds
+        "Landroid/webkit/WebView;":             (0.50, ["overlay_fraud", "credential_theft"]),
+        "Landroid/webkit/WebViewClient;":       (0.45, ["overlay_fraud"]),
+        # HTTP networking (direct, not OkHttp) — C2 raw
+        "Ljava/net/HttpURLConnection;":         (0.45, ["c2_networking"]),
+        # custom TLS / cert pinning bypass
+        "Ljavax/net/ssl/SSLContext;":           (0.50, ["anti_analysis"]),
+        "Ljavax/net/ssl/TrustManager;":         (0.50, ["anti_analysis"]),
+        # content observer — watching contacts/call-log for exfil trigger
+        "Landroid/database/ContentObserver;":   (0.55, ["data_exfiltration"]),
+        # process / shell execution
+        "Landroid/os/Process;":                 (0.55, ["privilege_escalation"]),
     }
 
     # Suspicious string patterns in bytecode const-string (fast scan, no decompile)
