@@ -21,9 +21,8 @@ import requests
 from typing import List, Dict, Any, Tuple, Optional
 from openai import OpenAI
 import openai, certifi, httpx
-from DefineRegisterTools_new import TOOL_REGISTRY, register_apk_tools, get_apk_context, clear_apk_context
-from updated_zstatic_apk_dump import dump_individual_apk
-from scan_with_yara import scan_this_bin_file_with_static_yara
+from DefineRegisterTools_new import get_apk_context, clear_apk_context
+import apk_pipeline_v2
 
 # -------------------- I/O ENCODING --------------------
 utf8_stream = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8',errors="replace")
@@ -1264,79 +1263,9 @@ def final_llm_verdict(
 # -------------------- PIPELINE --------------------
 def analyze_apk_pipeline(apk_path, logger, llm_client: OpenAI):
     """
-    Full pipeline for analyzing an APK.
-    Integrates string/class/permission analysis, static tools, YARA, consolidation, and verdict scoring.
+    Thin wrapper — delegates to apk_pipeline_v2.run().
     """
-
-    logger.info(f"Analyzing {apk_path}")
-
-    tool_results = run_tools(apk_path, logger)
-    strings_raw = tool_results.get("get_interesting_strings", [])
-    strings_out = analyze_strings_with_chunking(strings_raw, logger, "gpt-4.1-mini", llm_client)
-
-    classes_raw = tool_results.get("get_interesting_classes", {})
-    classes_out = analyze_classes_with_chunking(classes_raw, logger, "gpt-4.1-mini", llm_client)
-
-    # methods_raw = tool_results.get("get_interesting_methods",{})
-    # methods_out = analyze_methods_with_chunking(methods_raw,logger,"gpt-4.1-mini")
-
-    perms_raw = tool_results.get("get_permissions", [])
-    perms_out = analyze_permissions_with_chunking(perms_raw or [], logger, "gpt-4.1-mini", llm_client)
-
-    yara_report = add_yara_scan_result(apk_path)
-    yara_evidence = []
-    for detections in yara_report:
-        yara_evidence.append({"indicator": detections["detection_rule"], "source": "YARA", "category": "Malware", "strength": "strong", "confidence": 1, "explanation": "Malware detected by yara rule"})
-
-    tool_results["yara_detection"] = yara_report
-    tool_results["strings_analysis"] = strings_out
-    tool_results["classes_analysis"] = classes_out
-    # tool_results["methods_analysis"] = methods_out
-    tool_results["permissions_analysis"] = perms_out
-
-    keys_not_to_copy = ["get_interesting_strings","get_interesting_classes","get_interesting_methods","get_permissions"]
-    updated_tools_result = {k:tool_results[k] for k in tool_results if k not in keys_not_to_copy}
-
-    # 5. Combine evidence
-    combined_evidence = []
-    for section in (strings_out, classes_out, perms_out):
-        combined_evidence.extend(section.get("evidence", []))
-    # print(combined_evidence)
-    # exit(0)
-    combined_evidence.extend(static_evidence_from_tools(tool_results))
-    combined_evidence.extend(yara_evidence)
-
-    #Consolidate evidence
-    consolidated = consolidate_evidence(combined_evidence)
-
-    # # 6. Flatten consolidated evidence for scoring
-    # flat_evidence = []
-    # for strength, data in consolidated.items():
-    #     for ind in data["indicators"]:
-    #         flat_evidence.append({
-    #             "indicator": ind,
-    #             "strength": strength.replace("_confidence", ""),
-    #             "confidence": data["avg_confidence"],
-    #             "category": "mixed",
-    #             "explanation": data["summary_explanation"]
-    #         })
-
-    # 7. Adjudicate → preliminary verdict + risk + IOCs
-    prelim, risk, iocs = adjudicate(consolidated)
-
-    # 8. Final LLM refinement (pass consolidated instead of raw)
-    verdict = final_llm_verdict(
-        apk_path=apk_path,
-        tool_results=updated_tools_result,
-        preliminary_verdict=prelim,
-        preliminary_risk=risk,
-        preliminary_iocs=iocs,
-        consolidated_evidence=consolidated,
-        logger=logger,
-        llm_client=llm_client,
-    )
-
-    return verdict
+    return apk_pipeline_v2.run(apk_path, logger, llm_client)
 
 
 def isapk(path):
@@ -1541,7 +1470,7 @@ def run_single_runner(
     lease_duration_sec: float,
     worker_mode: bool,
 ) -> int:
-    register_apk_tools()
+    # Tool registry removed in v2 — extraction is handled directly in apk_pipeline_v2.
 
     apk_files = sorted(f for f in os.listdir(folder_path) if isapk(folder_path + os.sep + f))
     if not apk_files:

@@ -1,5 +1,6 @@
 import json
 import re
+from typing import Dict, List, Tuple
 from androguard.core.dex import DEX
 from androguard.core.analysis.analysis import Analysis
 from androguard.core.analysis.analysis import StringAnalysis
@@ -137,6 +138,80 @@ class APKAnalyzer:
     
         # VPN
         "android.permission.BIND_VPN_SERVICE"]
+
+    # ------------------------------------------------------------------
+    # Phase-1 API sensitivity scoring tables (bytecode-level, no decompile)
+    # ------------------------------------------------------------------
+
+    # Dalvik method descriptor → score added to containing class
+    # Key format: anything that appears in get_xref_to() class name or
+    # the resolved method descriptor string.
+    API_SCORES: Dict[str, Tuple[float, List[str]]] = {
+        # dynamic code loading
+        "Ldalvik/system/DexClassLoader;":       (1.00, ["dynamic_code_loading"]),
+        "Ldalvik/system/PathClassLoader;":      (0.90, ["dynamic_code_loading"]),
+        "Ldalvik/system/BaseDexClassLoader;":   (0.85, ["dynamic_code_loading"]),
+        "Ldalvik/system/InMemoryDexClassLoader;": (1.00, ["dynamic_code_loading"]),
+        # shell / privilege escalation
+        "Ljava/lang/Runtime;":                  (0.85, ["privilege_escalation"]),
+        "Ljava/lang/ProcessBuilder;":           (0.85, ["privilege_escalation"]),
+        # SMS abuse
+        "Landroid/telephony/SmsManager;":       (1.00, ["sms_abuse"]),
+        "Lcom/android/internal/telephony/ISms;": (0.90, ["sms_abuse"]),
+        # call interception
+        "Landroid/telephony/TelephonyManager;": (0.60, ["call_interception", "data_exfiltration"]),
+        # overlay / window
+        "Landroid/view/WindowManager;":         (0.75, ["overlay_fraud"]),
+        # accessibility abuse
+        "Landroid/accessibilityservice/AccessibilityService;": (0.85, ["accessibility_abuse"]),
+        "Landroid/view/accessibility/AccessibilityNodeInfo;":  (0.75, ["accessibility_abuse"]),
+        # data exfiltration
+        "Landroid/provider/ContactsContract;":  (0.70, ["data_exfiltration"]),
+        "Landroid/content/ContentResolver;":    (0.45, ["data_exfiltration"]),
+        "Landroid/provider/Telephony;":         (0.75, ["data_exfiltration"]),
+        "Landroid/location/LocationManager;":   (0.55, ["data_exfiltration"]),
+        "Landroid/hardware/Camera;":            (0.55, ["data_exfiltration"]),
+        "Landroid/media/AudioRecord;":          (0.65, ["data_exfiltration"]),
+        # C2 networking
+        "Ljava/net/Socket;":                    (0.55, ["c2_networking"]),
+        "Ljava/net/URL;":                       (0.40, ["c2_networking"]),
+        "Lorg/apache/http/client/HttpClient;":  (0.40, ["c2_networking"]),
+        # reflection / anti-analysis
+        "Ljava/lang/reflect/Method;":           (0.50, ["anti_analysis"]),
+        "Ljava/lang/Class;":                    (0.40, ["anti_analysis"]),
+        "Ljava/lang/ClassLoader;":              (0.50, ["anti_analysis"]),
+        # crypto (lower — very common; elevated only in combination)
+        "Ljavax/crypto/Cipher;":                (0.30, ["anti_analysis"]),
+        "Ljavax/crypto/spec/SecretKeySpec;":    (0.25, ["anti_analysis"]),
+        "Ljava/security/MessageDigest;":        (0.20, ["anti_analysis"]),
+        # credential theft
+        "Landroid/view/inputmethod/InputMethodManager;": (0.55, ["credential_theft"]),
+        "Landroid/app/KeyguardManager;":        (0.55, ["credential_theft"]),
+        # device admin / persistence
+        "Landroid/app/admin/DevicePolicyManager;": (0.80, ["persistence"]),
+        "Landroid/app/AlarmManager;":           (0.35, ["persistence"]),
+        "Landroid/app/job/JobScheduler;":       (0.30, ["persistence"]),
+    }
+
+    # Suspicious string patterns in bytecode const-string (fast scan, no decompile)
+    SUSPICIOUS_STR_SCORE: List[Tuple[re.Pattern, float, List[str]]] = [
+        (re.compile(r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", re.I), 0.80, ["c2_networking"]),
+        (re.compile(r"\b(?:[a-z0-9-]+\.(?:ru|cn|su|top|tk|pw|xyz|kim|click|biz|info))\b", re.I), 0.50, ["c2_networking"]),
+        (re.compile(r"https?://[^\s\"']{10,}\.php", re.I), 0.50, ["c2_networking"]),
+        (re.compile(r"\b(?:DexClassLoader|PathClassLoader|InMemoryDexClassLoader)\b"), 0.85, ["dynamic_code_loading"]),
+        (re.compile(r"/bin/sh|/system/bin/sh|cmd\.exe", re.I), 0.85, ["privilege_escalation"]),
+        (re.compile(r"\bsu\b"), 0.80, ["privilege_escalation"]),
+        (re.compile(r"\bTYPE_APPLICATION_OVERLAY\b|\bTYPE_PHONE\b|\bTYPE_SYSTEM_ALERT\b"), 0.65, ["overlay_fraud"]),
+        (re.compile(r"\bXposed\b|\bgenymotion\b|\bbluestacks\b", re.I), 0.50, ["anti_analysis"]),
+        (re.compile(r"\bchmod\s+[0-7]{3}", re.I), 0.80, ["privilege_escalation"]),
+    ]
+
+    # Budget cap: stop decompiling after this many bytes of source code
+    MAX_SOURCE_BUDGET_BYTES: int = 55_000
+    # Floor: skip decompiling classes below this score
+    MIN_CLASS_SCORE_FOR_DECOMPILE: float = 0.20
+    # Propagation multiplier: if class A (score S) calls class B, add S * PROP_FACTOR to B
+    PROPAGATION_FACTOR: float = 0.30
 
     def __init__(self, apk, apk_data):
         self.apk = apk
@@ -370,4 +445,203 @@ class APKAnalyzer:
 
         return methods
 
+    # ------------------------------------------------------------------
+    # v2: score-based class selection  (replaces max_depth traversal)
+    # ------------------------------------------------------------------
+
+    def score_all_classes(self) -> Tuple[Dict[str, float], Dict[str, List[str]]]:
+        """
+        Phase 1 + Phase 2: score every non-safe class using API call graph and
+        suspicious strings in bytecode — no decompilation.
+
+        Returns:
+          scores       : {class_name: float}
+          behavior_tags: {class_name: List[str]}  — deduplicated tags per class
+        """
+        scores: Dict[str, float] = {}
+        tag_map: Dict[str, List[str]] = {}
+
+        # --- Phase 1: raw API + string scan ---
+        for class_obj in self.analysis.get_classes():
+            cls_name = class_obj.name
+            if cls_name.startswith(self.SAFE_CLASSES):
+                continue
+
+            score = 0.0
+            tags: List[str] = []
+
+            # obfuscation heuristics
+            short_name = cls_name.split("/")[-1].rstrip(";")
+            if len(short_name) <= 2:
+                score += 0.20
+                tags.append("anti_analysis")
+
+            methods = list(class_obj.get_methods())
+            if methods:
+                short_method_count = sum(
+                    1 for m in methods if len(m.name) <= 2 and not m.name.startswith("<")
+                )
+                if short_method_count / len(methods) > 0.70:
+                    score += 0.30
+                    tags.append("anti_analysis")
+
+            # sensitive API calls (xref_to = classes this class references)
+            for xref_cls in class_obj.get_xref_to():
+                xref_name = xref_cls.name
+                for api_prefix, (api_score, api_tags) in self.API_SCORES.items():
+                    if xref_name.startswith(api_prefix):
+                        score += api_score
+                        tags.extend(api_tags)
+
+            # suspicious strings in bytecode (const-string instructions)
+            for method_obj in methods:
+                try:
+                    ma = self.analysis.get_method(method_obj.method)
+                    if ma is None:
+                        continue
+                    for block in ma.get_basic_blocks():
+                        for ins in block.get_instructions():
+                            if not ins.get_name().startswith("const-string"):
+                                continue
+                            for op in ins.get_operands():
+                                if not (isinstance(op, tuple) and len(op) == 3):
+                                    continue
+                                _, _, val = op
+                                if not isinstance(val, str):
+                                    continue
+                                for pat, str_score, str_tags in self.SUSPICIOUS_STR_SCORE:
+                                    if pat.search(val):
+                                        score += str_score
+                                        tags.extend(str_tags)
+                                        break
+                except Exception:
+                    continue
+
+            if score > 0:
+                scores[cls_name] = round(score, 4)
+                # deduplicate while preserving insertion order
+                seen: set = set()
+                deduped: List[str] = []
+                for t in tags:
+                    if t not in seen:
+                        seen.add(t)
+                        deduped.append(t)
+                tag_map[cls_name] = deduped
+
+        # --- Phase 2: one-hop propagation ---
+        # If class A scored ≥ 0.6 and calls class B, share PROPAGATION_FACTOR × A's score with B.
+        propagation_deltas: Dict[str, float] = {}
+        propagation_tags: Dict[str, List[str]] = {}
+        for class_obj in self.analysis.get_classes():
+            cls_name = class_obj.name
+            if cls_name not in scores or scores[cls_name] < 0.60:
+                continue
+            a_score = scores[cls_name]
+            a_tags = tag_map.get(cls_name, [])
+            for xref_cls in class_obj.get_xref_to():
+                target = xref_cls.name
+                if target.startswith(self.SAFE_CLASSES) or target == cls_name:
+                    continue
+                delta = round(a_score * self.PROPAGATION_FACTOR, 4)
+                propagation_deltas[target] = propagation_deltas.get(target, 0.0) + delta
+                existing = propagation_tags.get(target, [])
+                for t in a_tags:
+                    if t not in existing:
+                        existing.append(t)
+                propagation_tags[target] = existing
+
+        for cls_name, delta in propagation_deltas.items():
+            if cls_name.startswith(self.SAFE_CLASSES):
+                continue
+            scores[cls_name] = round(scores.get(cls_name, 0.0) + delta, 4)
+            existing = tag_map.get(cls_name, [])
+            for t in propagation_tags.get(cls_name, []):
+                if t not in existing:
+                    existing.append(t)
+            tag_map[cls_name] = existing
+
+        return scores, tag_map
+
+    def select_and_decompile_classes(
+        self,
+        scores: Dict[str, float],
+    ) -> Dict[str, str]:
+        """
+        Phase 3: sort classes by score descending, then decompile greedily until
+        MAX_SOURCE_BUDGET_BYTES is exhausted.  Classes below MIN_CLASS_SCORE_FOR_DECOMPILE
+        are never decompiled.
+
+        Returns {class_name: decompiled_source}
+        """
+        # Sort by score descending
+        ordered = sorted(
+            [(name, s) for name, s in scores.items() if s >= self.MIN_CLASS_SCORE_FOR_DECOMPILE],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+
+        decompiled: Dict[str, str] = {}
+        bytes_used = 0
+        skip_count = 0
+
+        for cls_name, score in ordered:
+            for cls_obj in self.analysis.find_classes(name=cls_name, no_external=True):
+                try:
+                    source = cls_obj.get_class().get_source() or ""
+                except Exception:
+                    source = f"// [decompile failed: {cls_name}]"
+
+                if not source.strip():
+                    continue
+
+                src_bytes = len(source.encode("utf-8", errors="replace"))
+
+                if bytes_used + src_bytes > self.MAX_SOURCE_BUDGET_BYTES:
+                    skip_count += 1
+                    # keep trying smaller classes further down the list
+                    if bytes_used > self.MAX_SOURCE_BUDGET_BYTES * 0.85:
+                        # budget nearly full — stop iterating
+                        break
+                    continue
+
+                decompiled[cls_name] = source
+                bytes_used += src_bytes
+                break  # found the class, stop inner loop
+
+            if bytes_used > self.MAX_SOURCE_BUDGET_BYTES * 0.85 and skip_count > 5:
+                break
+
+        return decompiled
+
+    def extract_strings_from_scored_classes(
+        self,
+        selected_class_names: List[str],
+    ) -> Dict[str, List[str]]:
+        """
+        Extract const-string values from the budget-selected classes only.
+        Returns {class_name: [string, …]}.
+        """
+        result: Dict[str, List[str]] = {}
+        for cls_name in selected_class_names:
+            strs: List[str] = []
+            for cls_obj in self.analysis.find_classes(name=cls_name, no_external=True):
+                for method_obj in cls_obj.get_methods():
+                    try:
+                        ma = self.analysis.get_method(method_obj.method)
+                        if ma is None:
+                            continue
+                        for block in ma.get_basic_blocks():
+                            for ins in block.get_instructions():
+                                if not ins.get_name().startswith("const-string"):
+                                    continue
+                                for op in ins.get_operands():
+                                    if isinstance(op, tuple) and len(op) == 3:
+                                        _, _, val = op
+                                        if isinstance(val, str) and len(val) >= 4:
+                                            strs.append(val)
+                    except Exception:
+                        continue
+            if strs:
+                result[cls_name] = strs
+        return result
 
