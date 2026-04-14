@@ -19,13 +19,13 @@ import re
 import sys
 from typing import Any, Dict, List
 
-# ── Evidence schema (lazy to avoid circular imports) ─────────────────────────
+# -- Evidence schema (lazy to avoid circular imports) -------------------------
 def _ei():
     from evidence_schema import EvidenceItem, make_evidence_id
     return EvidenceItem, make_evidence_id
 
 
-# ── Suspicious domain / IP patterns for quick triage ─────────────────────────
+# -- Suspicious domain / IP patterns for quick triage -------------------------
 _SUSPICIOUS_TLD = re.compile(
     r"\b[a-z0-9-]+\.(?:ru|cn|su|top|tk|pw|xyz|kim|click|info|biz|cc)\b", re.I
 )
@@ -33,7 +33,7 @@ _IP_URL = re.compile(r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", re.I)
 _RAW_IP = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
 _PHP_URL = re.compile(r"https?://[^\s\"']{10,}\.php", re.I)
 
-# ── SMBA behavior section → behavior family mapping ──────────────────────────
+# -- SMBA behavior section -> behavior family mapping --------------------------
 _BEHAVIOR_SECTION_MAP = {
     "spyware":         (["data_exfiltration", "call_interception"], 0.90, "malicious"),
     "stealth":         (["anti_analysis"],                          0.85, "malicious"),
@@ -44,7 +44,7 @@ _BEHAVIOR_SECTION_MAP = {
     "virus_malware":   (["c2_networking", "data_exfiltration"],     0.90, "malicious"),
 }
 
-# ── MITRE ATT&CK tactic → behavior family mapping ────────────────────────────
+# -- MITRE ATT&CK tactic -> behavior family mapping ----------------------------
 _MITRE_TACTIC_MAP = {
     "collection":            (["data_exfiltration"],           0.75, "malicious"),
     "command-and-control":   (["c2_networking"],               0.85, "malicious"),
@@ -186,7 +186,7 @@ def _items_from_behavior(behavior: Dict[str, Any], logger: logging.Logger) -> "L
             strength=strength,
             behavior_tags=tags,
             explanation=f"Zscaler sandbox detected {section_name} behavior with {result_count} indicator(s)",
-            benign_alternatives="None — SMBA sandbox behavior flag is authoritative",
+            benign_alternatives="None -- SMBA sandbox behavior flag is authoritative",
         ))
 
     logger.info("[smba] %d behavior evidence items", len(items))
@@ -228,7 +228,7 @@ def _items_from_mitre(mitre: Dict[str, Any], logger: logging.Logger) -> "List":
             strength=strength,
             behavior_tags=tags,
             explanation=f"Zscaler sandbox mapped this sample to MITRE ATT&CK tactic '{tactic}'",
-            benign_alternatives="None — MITRE ATT&CK mapping is based on observed sandbox behavior",
+            benign_alternatives="None -- MITRE ATT&CK mapping is based on observed sandbox behavior",
         ))
 
     logger.info("[smba] %d MITRE tactic evidence items", len(items))
@@ -239,12 +239,16 @@ def enrich_from_smba(
     sha256: str,
     env_path: str,
     logger: logging.Logger,
+    jsessionid_override: str = "",
 ) -> "List":
     """
     Query Zscaler SMBA sandbox for the given SHA-256 hash.
     Returns a list of EvidenceItems, or [] if unavailable/not found.
 
     env_path  path to the .env file containing ZSCALER_BASE_URL and ZSCALER_JSESSIONID.
+    jsessionid_override  if non-empty, use this JSESSIONID instead of the one in .env.
+                         Useful when the session has expired and you pass a fresh token
+                         via --smba-jsessionid on the command line.
     """
     if not _client_available():
         logger.debug("[smba] dependencies not installed, skipping SMBA enrichment")
@@ -254,11 +258,25 @@ def enrich_from_smba(
         logger.debug("[smba] .env not found at %s, skipping SMBA enrichment", env_path)
         return []
 
+    # If a fresh JSESSIONID was passed via CLI, patch the env var before loading client.
+    # This avoids having to write to disk -- os.environ is process-local.
+    _orig_session = None
+    if jsessionid_override:
+        _orig_session = os.environ.get("ZSCALER_JSESSIONID")
+        os.environ["ZSCALER_JSESSIONID"] = jsessionid_override
+        logger.info("[smba] using JSESSIONID override from CLI (len=%d)", len(jsessionid_override))
+
     try:
         client = _load_smba_client(env_path)
     except Exception as exc:
         logger.warning("[smba] client init failed: %s", exc)
         return []
+    finally:
+        # Restore original env var so other processes/threads are not affected.
+        if _orig_session is not None:
+            os.environ["ZSCALER_JSESSIONID"] = _orig_session
+        elif jsessionid_override and "ZSCALER_JSESSIONID" in os.environ:
+            del os.environ["ZSCALER_JSESSIONID"]
 
     try:
         if not client.sample_exists(sha256):
@@ -268,7 +286,7 @@ def enrich_from_smba(
         logger.warning("[smba] sample_exists check failed: %s", exc)
         return []
 
-    logger.info("[smba] sample found — pulling traffic + behavior + MITRE")
+    logger.info("[smba] sample found -- pulling traffic + behavior + MITRE")
 
     try:
         report = client.get_full_report(sha256, include_artifacts=False)

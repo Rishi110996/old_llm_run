@@ -4,13 +4,13 @@ cluster_scorer.py
 Deterministic scoring of BehaviorClusters.  No LLM calls.
 
 Formula per cluster:
-  base    = Σ(item.strength × direction_weight) / item_count
-  corr    = 1.0 + 0.15 × max_chain_length     (corroboration bonus)
-  benign  = benign_item_count × 0.10           (benign discount)
-  score   = clamp(base × corr - benign, 0, 1)
+  base    = Sum(item.strength x direction_weight) / item_count
+  corr    = 1.0 + 0.15 x max_chain_length     (corroboration bonus)
+  benign  = benign_item_count x 0.10           (benign discount)
+  score   = clamp(base x corr - benign, 0, 1)
 
 App-level pre-score:
-  Σ(cluster_score × FAMILY_WEIGHT[family]) clamped to [0, 100]
+  Sum(cluster_score x FAMILY_WEIGHT[family]) clamped to [0, 100]
   Benign-only families contribute negative weight.
 """
 from __future__ import annotations
@@ -49,14 +49,14 @@ FAMILY_SEVERITY: Dict[str, float] = {
     "normal_app_behavior":   -0.20,   # actively lowers risk score
 }
 
-# Clusters that always request LLM review when score ≥ HIGH_IMPACT_THRESHOLD
+# Clusters that always request LLM review when score >= HIGH_IMPACT_THRESHOLD
 HIGH_IMPACT_FAMILIES = {
     "sms_abuse", "dynamic_code_loading", "privilege_escalation",
     "credential_theft", "accessibility_abuse", "overlay_fraud", "call_interception",
 }
 # Score thresholds for LLM review
-LLM_REVIEW_THRESHOLD     = 0.50   # any family at this score → review
-LOW_PRIORITY_THRESHOLD   = 0.30   # high-impact families at this score → review
+LLM_REVIEW_THRESHOLD     = 0.50   # any family at this score -> review
+LOW_PRIORITY_THRESHOLD   = 0.30   # high-impact families at this score -> review
 
 
 def score_cluster(cluster: BehaviorCluster) -> Tuple[float, bool]:
@@ -94,7 +94,7 @@ def score_all_clusters(
 ) -> Tuple[Dict[str, BehaviorCluster], int]:
     """
     Mutates each cluster in-place with preliminary_score and needs_llm_review.
-    Returns the updated clusters dict and the integer app pre-score (0–100).
+    Returns the updated clusters dict and the integer app pre-score (0-100).
     """
     weighted_sum = 0.0
     weight_total = 0.0

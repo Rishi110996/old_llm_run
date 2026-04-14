@@ -17,12 +17,12 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
-# ── VT API constants ──────────────────────────────────────────────────────────
+# -- VT API constants ----------------------------------------------------------
 _VT_BASE = "https://www.virustotal.com/api/v3"
 _BEHAVIOURS_EP = _VT_BASE + "/files/{sha256}/behaviours"
 _PCAP_EP       = _VT_BASE + "/file_behaviours/{sandbox_id}/pcap"
 
-# ── Quick triage patterns ────────────────────────────────────────────────────
+# -- Quick triage patterns ----------------------------------------------------
 _SUSPICIOUS_TLD = re.compile(
     r"\b[a-z0-9-]+\.(?:ru|cn|su|top|tk|pw|xyz|kim|click|info|biz|cc)\b", re.I
 )
@@ -33,7 +33,237 @@ _PHP_URL = re.compile(r"https?://[^\s\"']{10,}\.php", re.I)
 # Ports that are benign by convention; anything else on a raw IP is suspicious
 _BENIGN_PORTS = {80, 443, 8080, 8443, 53, 123}
 
-# ── MITRE ATT&CK T-code → (behavior_tags, strength, direction) ───────────────
+# ---------------------------------------------------------------------------
+# Known-benign IP prefixes.
+# IPs matching these prefixes belong to Google, Cloudflare, AWS, Akamai,
+# Apple, Microsoft, Meta, Fastly, and Zscaler.
+# They are downgraded to ambiguous/low-strength instead of auto-malicious.
+# ---------------------------------------------------------------------------
+_BENIGN_IP_PREFIXES = [
+    # Google / Firebase / GCM
+    "8.8.", "8.34.", "8.35.",
+    "64.233.", "66.102.", "66.249.", "72.14.", "74.125.",
+    "104.132.", "104.133.", "104.154.", "104.155.", "104.196.",
+    "108.177.", "130.211.",
+    "142.250.", "142.251.",
+    "172.217.", "172.253.", "173.194.", "173.195.", "173.196.",
+    "192.178.", "199.36.", "207.223.", "209.85.", "216.239.", "216.58.",
+    # Cloudflare
+    "1.0.0.", "1.1.1.",
+    "104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.",
+    "104.22.", "104.23.", "104.24.", "104.25.", "104.26.", "104.27.",
+    "162.158.", "172.64.", "172.65.", "172.66.", "172.67.",
+    "188.114.", "190.93.", "197.234.", "198.41.",
+    # Amazon AWS / CloudFront
+    "13.32.", "13.33.", "13.35.", "13.224.", "13.225.", "13.226.",
+    "13.227.", "13.249.", "15.197.", "18.160.", "18.164.", "18.165.",
+    "52.84.", "52.85.", "52.222.", "54.230.", "54.239.",
+    "143.204.", "205.251.",
+    # Akamai
+    "23.0.", "23.32.", "23.33.", "23.34.", "23.35.", "23.36.",
+    "23.37.", "23.38.", "23.39.", "23.40.", "23.41.", "23.42.",
+    "23.43.", "23.44.", "23.45.", "23.46.", "23.47.", "23.48.",
+    "23.49.", "23.50.", "23.51.", "23.52.", "23.53.", "23.54.",
+    "23.55.", "23.56.", "23.57.", "23.58.", "23.59.", "23.60.",
+    "23.61.", "23.62.", "23.63.", "23.64.", "23.65.", "23.66.",
+    "23.67.", "23.193.", "23.194.", "23.195.", "23.196.",
+    "63.80.", "72.246.", "96.16.", "96.17.",
+    "104.64.", "104.65.", "104.66.", "104.67.", "104.68.", "104.69.",
+    "104.70.", "104.71.", "104.72.", "104.73.", "104.74.", "104.75.",
+    "104.76.", "104.77.", "104.78.", "104.79.", "104.80.", "104.81.",
+    "104.82.", "104.83.", "104.84.", "104.85.", "104.86.", "104.87.",
+    "184.24.", "184.25.", "184.26.", "184.27.", "184.28.", "184.29.",
+    "184.30.", "184.31.", "184.50.", "184.51.", "184.84.", "184.85.",
+    # Microsoft / Azure
+    "13.64.", "13.65.", "13.66.", "13.67.", "13.68.", "13.69.",
+    "13.70.", "13.71.", "13.72.", "13.73.", "13.74.", "13.75.",
+    "13.76.", "13.77.", "13.78.", "13.79.", "13.80.", "13.81.",
+    "20.36.", "20.37.", "20.38.", "20.39.", "20.40.", "20.41.",
+    "20.42.", "20.43.", "20.44.", "20.45.", "20.46.", "20.47.",
+    "40.64.", "40.65.", "40.66.", "40.67.", "40.68.", "40.69.",
+    "40.70.", "40.71.", "40.72.", "40.73.", "40.74.", "40.75.",
+    "52.224.", "52.225.", "52.226.", "52.228.", "52.229.", "52.230.",
+    # Apple
+    "17.0.", "17.1.", "17.2.", "17.3.", "17.4.", "17.5.",
+    "17.6.", "17.7.", "17.8.", "17.9.",
+    "17.32.", "17.33.", "17.34.", "17.35.",
+    # Meta / Facebook
+    "31.13.", "66.220.", "69.63.", "69.171.",
+    "157.240.", "163.70.", "163.71.", "163.72.", "179.60.",
+    "185.60.", "204.15.",
+    # Fastly
+    "23.235.", "43.249.", "103.244.", "103.245.", "103.246.",
+    "103.247.", "151.101.", "157.52.", "167.82.",
+    "185.31.",
+    # Zscaler cloud
+    "136.226.", "147.161.", "165.225.", "170.85.",
+]
+
+
+def _is_known_benign_ip(ip: str) -> bool:
+    """Return True if the IP belongs to a known-benign CDN/cloud provider."""
+    for prefix in _BENIGN_IP_PREFIXES:
+        if ip.startswith(prefix):
+            return True
+    return False
+
+
+# VT IP reputation in-process cache {ip -> result_dict or None}
+_VT_IP_REPUTATION_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
+
+
+def _check_ip_reputation(
+    ip: str,
+    vt_api_key: Optional[str],
+    logger: logging.Logger,
+) -> Optional[Dict[str, Any]]:
+    """
+    Query VT /ip_addresses/{ip} for reputation data.
+    Returns a dict with malicious/suspicious/harmless/undetected/total/owner/country,
+    or None on error or rate-limit.
+    Results are cached per-process to avoid redundant API calls.
+    """
+    if not vt_api_key:
+        return None
+    if ip in _VT_IP_REPUTATION_CACHE:
+        return _VT_IP_REPUTATION_CACHE[ip]
+    try:
+        import requests as _req
+        r = _req.get(
+            f"{_VT_BASE}/ip_addresses/{ip}",
+            headers={"x-apikey": vt_api_key, "Accept": "application/json"},
+            timeout=10,
+        )
+        if r.status_code == 429:
+            logger.debug("[vt_ip] rate limited on IP reputation lookup for %s", ip)
+            _VT_IP_REPUTATION_CACHE[ip] = None
+            return None
+        if not r.ok:
+            _VT_IP_REPUTATION_CACHE[ip] = None
+            return None
+        attrs = r.json().get("data", {}).get("attributes", {})
+        stats = attrs.get("last_analysis_stats", {})
+        result = {
+            "malicious":  int(stats.get("malicious", 0)),
+            "suspicious": int(stats.get("suspicious", 0)),
+            "harmless":   int(stats.get("harmless", 0)),
+            "undetected": int(stats.get("undetected", 0)),
+            "total":      sum(stats.get(k, 0) for k in ("malicious", "suspicious", "harmless", "undetected")),
+            "community_score": int(attrs.get("reputation", 0)),
+            "owner":      str(attrs.get("as_owner") or ""),
+            "country":    str(attrs.get("country") or ""),
+        }
+        _VT_IP_REPUTATION_CACHE[ip] = result
+        logger.debug("[vt_ip] %s -> mal=%d harm=%d owner=%s",
+                     ip, result["malicious"], result["harmless"], result["owner"])
+        return result
+    except Exception as exc:
+        logger.debug("[vt_ip] reputation check failed for %s: %s", ip, exc)
+        _VT_IP_REPUTATION_CACHE[ip] = None
+        return None
+
+
+def _triage_ip(
+    ip: str,
+    port: int,
+    proto: str,
+    sandbox_name: str,
+    vt_api_key: Optional[str],
+    logger: logging.Logger,
+) -> tuple:
+    """
+    Triage a sandbox IP connection.
+    Returns (direction, strength, explanation, benign_alternatives).
+
+    Decision logic:
+    1. Known CDN prefix + benign port              -> ambiguous 0.15 (skip)
+    2. Known CDN prefix + non-standard port        -> check VT rep; malicious 0.75 or ambiguous 0.35
+    3. Non-CDN + non-standard port + VT flagged    -> malicious 0.85-0.97
+    4. Non-CDN + non-standard port + VT clean      -> ambiguous 0.45
+    5. Non-CDN + non-standard port + no VT data   -> malicious 0.90
+    6. Non-CDN + benign port + VT flagged >=5      -> malicious 0.65-0.95
+    7. Non-CDN + benign port + VT flagged 1-4      -> ambiguous 0.55
+    8. Non-CDN + benign port + VT clean            -> ambiguous 0.20
+    9. Non-CDN + benign port + no VT data          -> ambiguous 0.55
+    """
+    is_cdn = _is_known_benign_ip(ip)
+    is_nonstandard = port not in _BENIGN_PORTS
+
+    if is_nonstandard:
+        if is_cdn:
+            rep = _check_ip_reputation(ip, vt_api_key, logger)
+            if rep is not None and rep["malicious"] == 0 and rep["harmless"] > 5:
+                return (
+                    "ambiguous", 0.35,
+                    f"Known CDN IP {ip}:{port}/{proto} on non-standard port -- VT reputation clean (owner: {rep.get('owner', '?')})",
+                    "CDN/cloud IP on alternative port (e.g. STUN/QUIC)",
+                )
+            owner = (rep or {}).get("owner", "?")
+            return (
+                "malicious", 0.75,
+                f"CDN IP {ip}:{port}/{proto} on non-standard port in sandbox '{sandbox_name}' -- possible C2 tunnelling (owner: {owner})",
+                "Some CDN IPs serve QUIC/STUN on non-standard ports",
+            )
+        # Non-CDN, non-standard port
+        rep = _check_ip_reputation(ip, vt_api_key, logger)
+        if rep is not None:
+            if rep["malicious"] >= 3:
+                return (
+                    "malicious", min(0.97, 0.85 + rep["malicious"] * 0.01),
+                    f"IP {ip}:{port}/{proto} non-standard port; VT: {rep['malicious']} engines flagged (owner: {rep.get('owner', '?')})",
+                    "None -- flagged by VT engines on non-standard port",
+                )
+            if rep["malicious"] == 0 and rep["harmless"] > 5:
+                return (
+                    "ambiguous", 0.45,
+                    f"IP {ip}:{port}/{proto} non-standard port but VT reputation clean (owner: {rep.get('owner', '?')})",
+                    "Legitimate service on non-standard port",
+                )
+        return (
+            "malicious", 0.90,
+            f"Direct IP {ip}:{port}/{proto} on non-standard port in VT sandbox '{sandbox_name}'",
+            "CDN or legitimate backend on unusual port",
+        )
+
+    # Standard port
+    if is_cdn:
+        return (
+            "ambiguous", 0.15,
+            f"Known CDN/cloud IP {ip}:{port}/{proto} -- likely legitimate app backend",
+            "Google, Cloudflare, AWS, Akamai, Apple, Microsoft CDN",
+        )
+
+    # Non-CDN, standard port
+    rep = _check_ip_reputation(ip, vt_api_key, logger)
+    if rep is not None:
+        if rep["malicious"] >= 5:
+            return (
+                "malicious", min(0.95, 0.65 + rep["malicious"] * 0.015),
+                f"IP {ip}:{port}/{proto}; VT: {rep['malicious']} engines flagged (owner: {rep.get('owner', '?')})",
+                "None -- multiple VT engines flagged this IP",
+            )
+        if rep["malicious"] >= 1:
+            return (
+                "ambiguous", 0.55,
+                f"IP {ip}:{port}/{proto}; VT: {rep['malicious']} engine(s) flagged (owner: {rep.get('owner', '?')})",
+                "Low detection count -- may be false positive",
+            )
+        if rep["malicious"] == 0 and rep["harmless"] > 5:
+            return (
+                "ambiguous", 0.20,
+                f"IP {ip}:{port}/{proto}; VT reputation clean (owner: {rep.get('owner', '?')})",
+                "Legitimate server with clean VT reputation",
+            )
+
+    # No VT data
+    return (
+        "ambiguous", 0.55,
+        f"Direct IP {ip}:{port}/{proto} in VT sandbox '{sandbox_name}' (no VT reputation data available)",
+        "CDN, analytics, or legitimate backend",
+    )
+
+
+# -- MITRE ATT&CK T-code -> (behavior_tags, strength, direction) ---------------
 # Keyed by technique-id prefix (covers subtechniques via startswith match)
 _MITRE_TCODE_MAP = {
     # Collection
@@ -73,7 +303,7 @@ _MITRE_TCODE_MAP = {
     "T1517": (["accessibility_abuse"],                     0.85, "malicious"),  # Access Notifications
 }
 
-# ── IDS alert severity → (strength, direction) ────────────────────────────────
+# -- IDS alert severity -> (strength, direction) --------------------------------
 _IDS_SEVERITY_MAP = {
     "critical": (0.90, "malicious"),
     "high":     (0.80, "malicious"),
@@ -128,29 +358,28 @@ def _items_from_sandbox_report(
     seen: set,
     items: list,
     logger: logging.Logger,
+    vt_api_key: Optional[str] = None,
 ) -> None:
     """Extract network IOCs from a single VT sandbox report (Zenbox Android field layout)."""
     EvidenceItem, make_evidence_id = _ei()
     attrs = sandbox.get("attributes", {})
     sandbox_name = attrs.get("sandbox_name", "unknown")
 
-    # ── IP traffic (actual field: ip_traffic) ────────────────────────────
+    # -- IP traffic (actual field: ip_traffic) ----------------------------
     for entry in attrs.get("ip_traffic", []):
         ip  = str(entry.get("destination_ip") or "").strip()
-        port = entry.get("destination_port", 443)
-        proto = entry.get("transport_layer_protocol", "TCP")
+        port = int(entry.get("destination_port") or 443)
+        proto = str(entry.get("transport_layer_protocol") or "TCP")
         if not ip or ip in seen:
             continue
         seen.add(ip)
-        # Non-standard port on a direct IP is a strong C2 signal
-        if port not in _BENIGN_PORTS:
-            direction, strength = "malicious", 0.90
-            explanation = (f"Direct IP connection to {ip}:{port}/{proto} on non-standard port "
-                           f"observed in VT sandbox '{sandbox_name}'")
-        else:
-            direction, strength = _triage_value(ip)[0], _triage_value(ip)[1]
-            explanation = (f"Direct IP connection to {ip}:{port}/{proto} "
-                           f"observed in VT sandbox '{sandbox_name}'")
+        direction, strength, explanation, benign_alts = _triage_ip(
+            ip, port, proto, sandbox_name, vt_api_key, logger
+        )
+        # Skip very-low-strength CDN items to reduce noise
+        if strength < 0.20:
+            logger.debug("[vt_ip] skipping known-CDN IP %s:%d (strength=%.2f)", ip, port, strength)
+            continue
         items.append(EvidenceItem(
             id=make_evidence_id("vt_traffic", f"{ip}:{port}", "virustotal"),
             kind="vt_traffic",
@@ -160,10 +389,10 @@ def _items_from_sandbox_report(
             strength=strength,
             behavior_tags=["c2_networking"],
             explanation=explanation,
-            benign_alternatives="CDN, analytics, or update endpoints",
+            benign_alternatives=benign_alts,
         ))
 
-    # ── Memory pattern domains (actual field: memory_pattern_domains) ────
+    # -- Memory pattern domains (actual field: memory_pattern_domains) ----
     for raw in attrs.get("memory_pattern_domains", []):
         val = str(raw).strip()
         if not val or val in seen:
@@ -182,7 +411,7 @@ def _items_from_sandbox_report(
             benign_alternatives="SDK, CDN, or analytics domain",
         ))
 
-    # ── Memory pattern URLs (actual field: memory_pattern_urls) ──────────
+    # -- Memory pattern URLs (actual field: memory_pattern_urls) ----------
     for raw in attrs.get("memory_pattern_urls", []):
         val = str(raw).strip()
         if not val or val in seen:
@@ -204,7 +433,7 @@ def _items_from_sandbox_report(
             benign_alternatives="SDK or library endpoint",
         ))
 
-    # ── IDS alerts (Suricata/ET rules) ────────────────────────────────────
+    # -- IDS alerts (Suricata/ET rules) ------------------------------------
     for alert in attrs.get("ids_alerts", []):
         severity = str(alert.get("alert_severity") or "low").lower()
         rule_msg = alert.get("rule_msg") or ""
@@ -256,7 +485,7 @@ def _items_from_sandbox_report(
                 benign_alternatives="CDN or analytics IP",
             ))
 
-    # ── MITRE ATT&CK techniques (field: mitre_attack_techniques, uses T-codes) ─
+    # -- MITRE ATT&CK techniques (field: mitre_attack_techniques, uses T-codes) -
     for t in attrs.get("mitre_attack_techniques", []):
         tid = (t.get("id") or "").upper() if isinstance(t, dict) else str(t).upper()
         if not tid:
@@ -284,11 +513,11 @@ def _items_from_sandbox_report(
             strength=strength,
             behavior_tags=tags,
             explanation=f"VT sandbox '{sandbox_name}' mapped to MITRE {tid}: {desc}",
-            benign_alternatives="None — MITRE mapping based on observed sandbox behavior",
+            benign_alternatives="None -- MITRE mapping based on observed sandbox behavior",
         ))
 
 
-# ── Known-generic certificate subject values ─────────────────────────────────
+# -- Known-generic certificate subject values ---------------------------------
 # These appear in self-signed debug certs generated by build tools.
 _GENERIC_CERT_SUBJECTS = {"app", "unknown", "android", "debug", "test", "example",
                           "sample", "user", "localhost", "org", "company", "name"}
@@ -311,7 +540,7 @@ def _items_from_file_report(
     EvidenceItem, make_evidence_id = _ei()
     items: list = []
 
-    # ── 1. Detection ratio ────────────────────────────────────────────────
+    # -- 1. Detection ratio ------------------------------------------------
     stats = attrs.get("last_analysis_stats", {})
     malicious  = stats.get("malicious", 0)
     suspicious = stats.get("suspicious", 0)
@@ -342,11 +571,11 @@ def _items_from_file_report(
                     f"{malicious} of {total} AV engines flagged this file as malicious "
                     f"({'%.0f' % (ratio*100)}% detection rate)"
                 ),
-                benign_alternatives="FP rate for Android APKs is low when ≥10 engines agree",
+                benign_alternatives="FP rate for Android APKs is low when >=10 engines agree",
             ))
         logger.info("[vt] detection: %d/%d engines malicious (%.0f%%)", malicious, total, ratio * 100)
 
-    # ── 2. Suggested threat label (AV consensus family name) ─────────────
+    # -- 2. Suggested threat label (AV consensus family name) -------------
     ptc = attrs.get("popular_threat_classification", {})
     label = ptc.get("suggested_threat_label", "")  # e.g. "trojan.bankbot/fuad"
     if label and not skip_detection:
@@ -375,11 +604,11 @@ def _items_from_file_report(
                 f"VirusTotal AV consensus classifies this file as '{label}' "
                 f"based on {sum(e.get('count',0) for e in ptc.get('popular_threat_name',[]))} engine agreement(s)"
             ),
-            benign_alternatives="None — AV consensus label is highly reliable",
+            benign_alternatives="None -- AV consensus label is highly reliable",
         ))
         logger.info("[vt] threat label: %s", label)
 
-    # ── 3. Certificate cross-check via androguard ────────────────────────
+    # -- 3. Certificate cross-check via androguard ------------------------
     cert = attrs.get("androguard", {}).get("certificate", {})
     if cert:
         subj = cert.get("Subject", {})
@@ -396,7 +625,7 @@ def _items_from_file_report(
                 strength=0.35,
                 behavior_tags=["anti_analysis"],
                 explanation=(
-                    "VT androguard confirms a generic/default certificate subject — "
+                    "VT androguard confirms a generic/default certificate subject -- "
                     "typical of malware built with default keytool settings"
                 ),
                 benign_alternatives="Some legitimate small-developer apps also use generic CN values",
@@ -473,7 +702,7 @@ def enrich_from_vt(
 
     headers = {"x-apikey": vt_api_key, "Accept": "application/json"}
 
-    # ── Fire both requests in parallel via threads ────────────────────────
+    # -- Fire both requests in parallel via threads ------------------------
     import concurrent.futures
 
     def _get_file_report():
@@ -486,7 +715,7 @@ def enrich_from_vt(
             _BEHAVIOURS_EP.format(sha256=sha256), headers=headers, timeout=30
         )
 
-    logger.info("[vt] fetching file report + behaviours for %s…", sha256[:16])
+    logger.info("[vt] fetching file report + behaviours for %s...", sha256[:16])
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         fut_file = pool.submit(_get_file_report)
         fut_beh  = pool.submit(_get_behaviours)
@@ -515,7 +744,7 @@ def enrich_from_vt(
     items: list = []
     seen: set   = set()
 
-    # ── File report items ─────────────────────────────────────────────────
+    # -- File report items -------------------------------------------------
     if resp_file is not None and resp_file.ok:
         try:
             file_attrs = resp_file.json()["data"]["attributes"]
@@ -528,7 +757,7 @@ def enrich_from_vt(
     elif resp_file is not None:
         logger.warning("[vt] file report HTTP %d", resp_file.status_code)
 
-    # ── Behaviours items ──────────────────────────────────────────────────
+    # -- Behaviours items --------------------------------------------------
     sandboxes: list = []
     if resp_beh is not None and resp_beh.ok:
         try:
@@ -545,7 +774,7 @@ def enrich_from_vt(
         pcap_save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pcaps")
 
     for sandbox in sandboxes:
-        _items_from_sandbox_report(sandbox, seen, items, logger)
+        _items_from_sandbox_report(sandbox, seen, items, logger, vt_api_key=vt_api_key)
 
         # Download PCAP if available for this sandbox
         attrs = sandbox.get("attributes", {})
@@ -565,7 +794,7 @@ def enrich_from_vt(
                     behavior_tags=["c2_networking"],
                     explanation=(f"Full network PCAP from VT sandbox '{sandbox_name}' saved to: "
                                  f"{pcap_path} ({os.path.getsize(pcap_path)//1024} KB)"),
-                    benign_alternatives="PCAP is raw capture — evidence strength from IP/IDS items above",
+                    benign_alternatives="PCAP is raw capture -- evidence strength from IP/IDS items above",
                 ))
         elif sandbox_id and attrs.get("has_pcap") is False:
             logger.debug("[vt] no PCAP for sandbox '%s'", sandbox_name)

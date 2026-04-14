@@ -32,7 +32,7 @@ ALL_FAMILIES: List[str] = [
 ]
 
 # Families that only get an LLM review if the deterministic score is truly
-# high — they produce too many false-positives otherwise.
+# high -- they produce too many false-positives otherwise.
 ALWAYS_REVIEW_FAMILIES: Set[str] = {
     "sms_abuse",
     "call_interception",
@@ -66,7 +66,7 @@ def _build_chains(items: List[EvidenceItem]) -> List[List[str]]:
 
     Strategy: group by distinct evidence *kind*.  A chain is a sequence of
     evidence item IDs where each step adds a different kind.
-    The longest chain is the most valuable signal — it means multiple
+    The longest chain is the most valuable signal -- it means multiple
     independent extraction methods all point at the same behavior.
 
     We return at most 3 chains (the longest distinct ones) to keep the
@@ -89,7 +89,7 @@ def _build_chains(items: List[EvidenceItem]) -> List[List[str]]:
 
     chains = [max_chain]
 
-    # Second chain: pick the second-best item from any kind that has ≥ 2 items
+    # Second chain: pick the second-best item from any kind that has >= 2 items
     alt_chain: List[str] = []
     for kind in _KIND_ORDER:
         pool = by_kind.get(kind, [])
@@ -135,7 +135,7 @@ def build_clusters(
     more than one family).
 
     After grouping, a synthetic `normal_app_behavior` cluster is added if no
-    high-scoring malicious families are present — this gives the final LLM
+    high-scoring malicious families are present -- this gives the final LLM
     explicit "all-clear" context for clean apps.
     """
     # Step 1: distribute items to families
@@ -189,7 +189,7 @@ def build_clusters(
         if synth_items:
             clusters["normal_app_behavior"] = _make_cluster("normal_app_behavior", synth_items)
         elif not clusters:
-            # APK has literally no evidence at all — still create an empty benign cluster
+            # APK has literally no evidence at all -- still create an empty benign cluster
             clusters["normal_app_behavior"] = BehaviorCluster(
                 family="normal_app_behavior",
                 evidence_items=[],

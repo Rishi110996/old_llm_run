@@ -1,7 +1,7 @@
 """
 apk_pipeline_v2.py
 ------------------
-Full analysis pipeline for one APK — 6 stages, no tool registry.
+Full analysis pipeline for one APK -- 6 stages, no tool registry.
 
 Stage 0  Full deterministic extraction via APKContext
 Stage 1  Evidence normalization (rule tables)
@@ -10,7 +10,7 @@ Stage 3  Deterministic pre-scoring
 Stage 4  Parallel LLM cluster review (claude-4-sonnet, needs_llm_review only)
 Stage 5  Final synthesis verdict (claude-4-sonnet)
 
-Entry point:  run(apk_path, logger, llm_client) → dict  (same schema as v1)
+Entry point:  run(apk_path, logger, llm_client) -> dict  (same schema as v1)
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def _extract_facts(apk_path: str, logger: logging.Logger) -> APKFacts:
     logger.info("[stage0] extracting strings from selected classes")
     strings_by_class = analyzer.extract_strings_from_scored_classes(list(selected_classes.keys()))
 
-    # Conditionally run YARA: only if any class has a score ≥ 0.5 or any
+    # Conditionally run YARA: only if any class has a score >= 0.5 or any
     # known C2/dynamic-loading string was found.  This avoids the expensive
     # dump_individual_apk() call on clean APKs.
     yara_matches: List[Dict[str, Any]] = []
@@ -119,7 +119,7 @@ def _check_multidex_and_assets(apk_path: str, logger: logging.Logger) -> List:
     try:
         apk = get_apk_context(apk_path).apk
 
-        # --- Multi-DEX: classes2.dex, classes3.dex, … ---
+        # --- Multi-DEX: classes2.dex, classes3.dex, ... ---
         all_dex = list(apk.get_all_dex())
         if len(all_dex) > 1:
             items.append(EvidenceItem(
@@ -131,7 +131,7 @@ def _check_multidex_and_assets(apk_path: str, logger: logging.Logger) -> List:
                 strength=0.65,
                 behavior_tags=["dynamic_code_loading", "anti_analysis"],
                 explanation=(
-                    f"APK contains {len(all_dex)} DEX files (classes.dex + classes2.dex…); "
+                    f"APK contains {len(all_dex)} DEX files (classes.dex + classes2.dex...); "
                     "common payload-hiding technique in droppers and banking trojans"
                 ),
                 benign_alternatives="Large apps exceeding the 64K method limit, multi-module build toolchains",
@@ -163,7 +163,7 @@ def _check_multidex_and_assets(apk_path: str, logger: logging.Logger) -> List:
                 behavior_tags=["dynamic_code_loading"],
                 explanation=(
                     f"APK asset '{fname}' is an embedded {kind_label}; "
-                    "classic dropper / staged-payload delivery — secondary code is loaded and executed at runtime"
+                    "classic dropper / staged-payload delivery -- secondary code is loaded and executed at runtime"
                 ),
                 benign_alternatives="Cordova/React-Native bundle assets, auto-update frameworks (rare; usually signed separately)",
             ))
@@ -203,7 +203,7 @@ def _check_app_obfuscation_entropy(apk_path: str, logger: logging.Logger) -> Lis
                 strength=strength,
                 behavior_tags=["anti_analysis"],
                 explanation=(
-                    f"{ratio:.0%} of user-defined class names are ≤2 chars — "
+                    f"{ratio:.0%} of user-defined class names are <=2 chars -- "
                     "signature of DexGuard/Allatori/commercial obfuscator used to hinder static analysis"
                 ),
                 benign_alternatives="Aggressive ProGuard minification in release builds can produce similar ratios",
@@ -218,7 +218,7 @@ def _check_app_obfuscation_entropy(apk_path: str, logger: logging.Logger) -> Lis
                 strength=0.55,
                 behavior_tags=["anti_analysis"],
                 explanation=(
-                    f"{ratio:.0%} of user-defined class names are ≤2 chars — "
+                    f"{ratio:.0%} of user-defined class names are <=2 chars -- "
                     "moderate obfuscation consistent with ProGuard minification or commercial obfuscator"
                 ),
                 benign_alternatives="Production apps commonly use ProGuard; this alone is not malicious",
@@ -229,11 +229,11 @@ def _check_app_obfuscation_entropy(apk_path: str, logger: logging.Logger) -> Lis
 
 
 # ---------------------------------------------------------------------------
-# YARA → evidence items
+# YARA -> evidence items
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# YARA rule name → behavior family mapping
+# YARA rule name -> behavior family mapping
 # Rule names follow the convention: Platform_Category_Family_ID
 # We match against lowercase rule name tokens (first match wins per entry).
 # Each entry: (keyword, behavior_tags, strength, direction)
@@ -275,7 +275,7 @@ _YARA_CATEGORY_MAP = [
     ("adfraud",        ["ad_analytics_only"],                            0.70, "ambiguous"),
     ("pua",            ["ad_analytics_only"],                            0.60, "ambiguous"),
     ("adware",         ["ad_analytics_only"],                            0.70, "ambiguous"),
-    # --- Generic trojan (broad — comes last to not shadow specific ones) ---
+    # --- Generic trojan (broad -- comes last to not shadow specific ones) ---
     ("trojan",         ["c2_networking", "data_exfiltration"],           0.85, "malicious"),
     ("spy",            ["data_exfiltration", "call_interception"],       0.90, "malicious"),
 ]
@@ -303,7 +303,7 @@ def _yara_evidence_items(yara_matches: List[Dict[str, Any]]):
             benign_alts = "Rule is explicitly classified as clean/benign by YARA signature"
         else:
             explanation = f"YARA rule matched: {rule}"
-            benign_alts = "None — a named YARA signature match is authoritative"
+            benign_alts = "None -- a named YARA signature match is authoritative"
         items.append(EvidenceItem(
             id=make_evidence_id("yara", rule, "yara"),
             kind="yara",
@@ -371,13 +371,13 @@ def _build_final_prompt(
         "  - A deterministic pre-score\n"
         "  - All extracted IOCs\n\n"
         "Rules:\n"
-        "  Mark Malicious ONLY if one or more cluster assessments are 'malicious' with confidence ≥ 0.70,\n"
+        "  Mark Malicious ONLY if one or more cluster assessments are 'malicious' with confidence >= 0.70,\n"
         "    OR the cross_cluster_patterns field shows a known malware combination.\n"
         "  Mark Suspicious if clusters are 'ambiguous' with no 'malicious' verdict, "
         "or malicious confidence < 0.70.\n"
         "  Mark Clean if all clusters are 'benign' or below meaningful threshold.\n"
         "  Do NOT invent evidence. The cluster assessments are your only source of truth.\n\n"
-        "Return STRICT JSON only — no markdown, no extra keys:\n"
+        "Return STRICT JSON only -- no markdown, no extra keys:\n"
         "{\n"
         "  \"Malicious\": 0|1,\n"
         "  \"Suspicious\": 0|1,\n"
@@ -432,6 +432,7 @@ def run(
     llm_client: OpenAI,
     *,
     use_smba: bool = False,
+    smba_jsessionid: str = "",
     vt_api_key: Optional[str] = None,
     no_vt_detection: bool = False,
 ) -> Dict[str, Any]:
@@ -441,33 +442,33 @@ def run(
        Risk-Score: int, Summary: str, IOCs: [str]}
 
     Optional enrichment flags:
-      use_smba         — query Zscaler SMBA sandbox (requires smba_data_pull/.env)
-      vt_api_key       — query VT behaviours endpoint (falls back to config.yaml key if None)
-      no_vt_detection  — skip vt_detection / vt_threat_label items; keeps traffic/PCAP.
+      use_smba         -- query Zscaler SMBA sandbox (requires smba_data_pull/.env)
+      vt_api_key       -- query VT behaviours endpoint (falls back to config.yaml key if None)
+      no_vt_detection  -- skip vt_detection / vt_threat_label items; keeps traffic/PCAP.
                          Use when batch-analysing VT-sourced samples where detection is known.
     """
     from modified_trial8_multiple_models import call_llm, normalize_final_verdict, safe_log
 
-    # ── Stage 0: extraction ────────────────────────────────────────────────
+    # -- Stage 0: extraction ------------------------------------------------
     logger.info("[pipeline_v2] Stage 0: extraction")
     apk_facts = _extract_facts(apk_path, logger)
 
-    # ── Stage 0b: ssdeep corpus comparison ────────────────────────────────
+    # -- Stage 0b: ssdeep corpus comparison --------------------------------
     logger.info("[pipeline_v2] Stage 0b: ssdeep similarity")
     ssdeep_items = _run_ssdeep(apk_path, logger)
     logger.info("[pipeline_v2] ssdeep: %d evidence item(s)", len(ssdeep_items))
 
-    # ── Stage 0c: multi-DEX / embedded asset detection ────────────────────
+    # -- Stage 0c: multi-DEX / embedded asset detection --------------------
     logger.info("[pipeline_v2] Stage 0c: multi-DEX / embedded asset detection")
     multidex_items = _check_multidex_and_assets(apk_path, logger)
     logger.info("[pipeline_v2] multi-DEX/asset: %d evidence item(s)", len(multidex_items))
 
-    # ── Stage 0d: app-level class-name entropy (obfuscation depth) ────────
+    # -- Stage 0d: app-level class-name entropy (obfuscation depth) --------
     logger.info("[pipeline_v2] Stage 0d: class-name entropy")
     entropy_items = _check_app_obfuscation_entropy(apk_path, logger)
     logger.info("[pipeline_v2] entropy: %d evidence item(s)", len(entropy_items))
 
-    # ── Stage 1: evidence normalization ───────────────────────────────────
+    # -- Stage 1: evidence normalization -----------------------------------
     logger.info("[pipeline_v2] Stage 1: normalization")
     evidence_items = normalize_all(apk_facts)
 
@@ -482,7 +483,7 @@ def run(
 
     logger.info("[pipeline_v2] %d evidence items after normalization", len(evidence_items))
 
-    # ── Stage 1b/c (optional): sandbox enrichment ────────────────────────
+    # -- Stage 1b/c (optional): sandbox enrichment ------------------------
     # NOTE: sha256 is only computed when at least one enrichment source is active.
     # VT runs only when vt_api_key was explicitly provided by the caller
     # (set via --vt-enrich flag in the CLI); it does NOT auto-load from config here.
@@ -496,8 +497,8 @@ def run(
     if use_smba and _sha256:
         smba_env = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "smba_data_pull", ".env")
-        logger.info("[pipeline_v2] Stage 1b: SMBA enrichment (sha256=%s…)", _sha256[:16])
-        smba_items = smba_enrichment.enrich_from_smba(_sha256, smba_env, logger)
+        logger.info("[pipeline_v2] Stage 1b: SMBA enrichment (sha256=%s...)", _sha256[:16])
+        smba_items = smba_enrichment.enrich_from_smba(_sha256, smba_env, logger, jsessionid_override=smba_jsessionid)
         evidence_items.extend(smba_items)
         logger.info("[pipeline_v2] SMBA: %d item(s) added", len(smba_items))
 
@@ -513,12 +514,12 @@ def run(
         evidence_items.extend(vt_items)
         logger.info("[pipeline_v2] VT: %d item(s) added", len(vt_items))
 
-    # ── Stage 2: clustering ────────────────────────────────────────────────
+    # -- Stage 2: clustering ------------------------------------------------
     logger.info("[pipeline_v2] Stage 2: clustering")
     clusters = build_clusters(evidence_items, apk_facts)
     logger.info("[pipeline_v2] %d active cluster(s): %s", len(clusters), list(clusters.keys()))
 
-    # ── Stage 3: pre-scoring ───────────────────────────────────────────────
+    # -- Stage 3: pre-scoring -----------------------------------------------
     logger.info("[pipeline_v2] Stage 3: pre-scoring")
     clusters, app_pre_score = score_all_clusters(clusters)
     logger.info("[pipeline_v2] app pre-score: %d", app_pre_score)
@@ -528,7 +529,7 @@ def run(
             fam, cl.preliminary_score, cl.needs_llm_review,
         )
 
-    # ── Stage 4: parallel LLM cluster review ──────────────────────────────
+    # -- Stage 4: parallel LLM cluster review ------------------------------
     logger.info("[pipeline_v2] Stage 4: LLM cluster review")
 
     def _call_llm_bound(messages, model, _logger):
@@ -536,7 +537,7 @@ def run(
 
     assessments = review_clusters(clusters, apk_facts, _call_llm_bound, logger)
 
-    # ── Stage 5: final synthesis ───────────────────────────────────────────
+    # -- Stage 5: final synthesis -------------------------------------------
     logger.info("[pipeline_v2] Stage 5: final synthesis verdict")
     final_messages = _build_final_prompt(apk_facts, assessments, app_pre_score)
     safe_log(logger, json.dumps({"stage5_input": {
@@ -550,7 +551,7 @@ def run(
     if normalized is None:
         raise RuntimeError("Final LLM verdict unavailable or invalid after retries")
 
-    logger.info("[pipeline_v2] DONE — %s  risk=%d",
+    logger.info("[pipeline_v2] DONE -- %s  risk=%d",
                 normalized.get("Malicious") and "MALICIOUS" or
                 normalized.get("Suspicious") and "SUSPICIOUS" or "CLEAN",
                 normalized.get("Risk-Score", 0))

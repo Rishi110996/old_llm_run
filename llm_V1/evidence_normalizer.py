@@ -1,7 +1,7 @@
 """
 evidence_normalizer.py
 -----------------------
-Converts raw APKFacts → List[EvidenceItem] using deterministic rule tables.
+Converts raw APKFacts -> List[EvidenceItem] using deterministic rule tables.
 No LLM calls here.
 """
 from __future__ import annotations
@@ -219,7 +219,7 @@ class _StringRule:
 
 
 _STRING_RULES: List[_StringRule] = [
-    # ── hardcoded C2 / networking ──────────────────────────────────────────
+    # -- hardcoded C2 / networking ------------------------------------------
     _StringRule(
         re.compile(r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", re.I),
         "malicious", 0.85, ["c2_networking"],
@@ -244,7 +244,7 @@ _STRING_RULES: List[_StringRule] = [
         "Hardcoded URL; may be an API or C2 endpoint",
         "Any app that communicates with a backend server",
     ),
-    # ── dynamic loading ────────────────────────────────────────────────────
+    # -- dynamic loading ----------------------------------------------------
     _StringRule(
         re.compile(r"\b(?:DexClassLoader|PathClassLoader|BaseDexClassLoader)\b"),
         "malicious", 0.90, ["dynamic_code_loading"],
@@ -263,7 +263,7 @@ _STRING_RULES: List[_StringRule] = [
         "Custom .dex file reference in string",
         "Plugin-based frameworks",
     ),
-    # ── shell / privilege escalation ──────────────────────────────────────
+    # -- shell / privilege escalation --------------------------------------
     _StringRule(
         re.compile(r"\bsu\b"),
         "malicious", 0.90, ["privilege_escalation"],
@@ -294,7 +294,7 @@ _STRING_RULES: List[_StringRule] = [
         "chmod command; changing file permissions, often used to make payloads executable",
         "Unlikely in legitimate Android apps",
     ),
-    # ── anti-analysis / obfuscation ───────────────────────────────────────
+    # -- anti-analysis / obfuscation ---------------------------------------
     _StringRule(
         re.compile(r"\b(?:genymotion|bluestacks|nox|youwave|memu)\b", re.I),
         "ambiguous", 0.55, ["anti_analysis"],
@@ -313,49 +313,49 @@ _STRING_RULES: List[_StringRule] = [
         "Xposed framework detection; anti-hooking check",
         "Security-sensitive apps (banking) may check for Xposed",
     ),
-    # ── overlay ───────────────────────────────────────────────────────────
+    # -- overlay -----------------------------------------------------------
     _StringRule(
         re.compile(r"\bTYPE_APPLICATION_OVERLAY\b|\bTYPE_PHONE\b|\bTYPE_SYSTEM_ALERT\b"),
         "ambiguous", 0.70, ["overlay_fraud"],
         "System window type constant; drawing overlays over other apps",
         "Floating widget apps, chat heads, annotation tools",
     ),
-    # ── credential theft ──────────────────────────────────────────────────
+    # -- credential theft --------------------------------------------------
     _StringRule(
         re.compile(r"\bgetCurrentInputConnection\b|\bcommitText\b"),
         "ambiguous", 0.65, ["credential_theft"],
         "IME input connection API; can intercept keystrokes in a custom keyboard",
         "Legitimate keyboard apps (Gboard-style)",
     ),
-    # ── base64 / encoded payloads ─────────────────────────────────────────
+    # -- base64 / encoded payloads -----------------------------------------
     _StringRule(
         re.compile(r"[A-Za-z0-9+/]{60,}={0,2}"),
         "ambiguous", 0.35, ["anti_analysis"],
         "Long Base64 string; may be an encoded embedded payload or C2 config",
         "Embedded images, Firebase config, certificate blobs",
     ),
-    # ── hardcoded keys/hexstrings ─────────────────────────────────────────
+    # -- hardcoded keys/hexstrings -----------------------------------------
     _StringRule(
         re.compile(r"[0-9a-fA-F]{32,}"),
         "ambiguous", 0.20, ["anti_analysis"],
         "Long hex string; may be a hardcoded RC4/AES key or command hash",
         "API keys, hash digests, Firebase sender IDs",
     ),
-    # ── Telegram Bot C2 dead-drop (Spymax, Spynote, modern Android RATs) ─────
+    # -- Telegram Bot C2 dead-drop (Spymax, Spynote, modern Android RATs) -----
     _StringRule(
         re.compile(r"https?://api\.telegram\.org/bot\d{7,12}:[A-Za-z0-9_-]{35}", re.I),
         "malicious", 0.90, ["c2_networking"],
         "Telegram Bot API token acting as C2 dead-drop; used extensively by Spymax, Spynote, AhMyth variants, and modern Android RATs",
         "Legitimate Telegram bot SDK integration (extremely rare to hardcode token in production APK)",
     ),
-    # ── Paste-site dead-drops (Anubis, Cerberus, BankBot) ────────────────────
+    # -- Paste-site dead-drops (Anubis, Cerberus, BankBot) --------------------
     _StringRule(
         re.compile(r"pastebin\.com/raw/|paste\.ee/r/|hastebin\.com/raw/|rentry\.co/", re.I),
         "malicious", 0.80, ["c2_networking"],
         "Paste-site raw endpoint used as dead-drop C2 relay; changes C2 domain without updating APK to evade domain blocklists",
         "Developer sharing configs via paste-sites (should not appear in a production APK)",
     ),
-    # ── Hardcoded banking app package targets (overlay launch trigger) ────────
+    # -- Hardcoded banking app package targets (overlay launch trigger) --------
     _StringRule(
         re.compile(
             r"com\.(?:chase|bankofamerica|wellsfargo|citibank|hsbc|barclays|"
@@ -553,7 +553,7 @@ _PACKAGE_TYPOSQUAT_RULES: List[Tuple[re.Pattern, str, float, List[str], str, str
         0.82,
         ["overlay_fraud", "credential_theft"],
         "Package name impersonates Google Play Services; malware often borrows this namespace to appear trusted",
-        "None for third-party APKs — the canonical Play Services package is com.google.android.gms",
+        "None for third-party APKs -- the canonical Play Services package is com.google.android.gms",
     ),
     (
         re.compile(r"^com\.android\.(?:settings|system|systemui|update|security|packageinstaller)(?:\..+)?$", re.I),
@@ -569,7 +569,7 @@ _PACKAGE_TYPOSQUAT_RULES: List[Tuple[re.Pattern, str, float, List[str], str, str
         0.80,
         ["overlay_fraud", "credential_theft"],
         "Package name uses a typo-squatted trusted brand namespace",
-        "None — the misspelling itself is a deception signal",
+        "None -- the misspelling itself is a deception signal",
     ),
 ]
 
@@ -591,7 +591,7 @@ _KNOWN_MALWARE_CERT_THUMBPRINTS: Dict[str, str] = {
     # Standard Android debug keystore (keytool default DN; recycled in repackaged/trojanised APKs)
     # Note: CN is also caught by _DEBUG_CERT_SUBJECT_PATTERN; thumbprint gives strength=1.0
     "a40da80a59d170caa950cf15c18c454d47a39b26": "android_debug_cert_repack",
-    # ── ADD MORE FROM YOUR OWN MALWARE CORPUS ────────────────────────────────────
+    # -- ADD MORE FROM YOUR OWN MALWARE CORPUS ------------------------------------
     # Extract with:  apksigner verify --print-certs sample.apk
     #           or:  keytool -printcert -jarfile sample.apk
     # Format: "<sha1_40hex_no_colons_lowercase>": "<FamilyName>",
@@ -599,7 +599,7 @@ _KNOWN_MALWARE_CERT_THUMBPRINTS: Dict[str, str] = {
 
 # Suspicious subject CN / O patterns in signing certs
 _SUSPICIOUS_CERT_PATTERNS: List[re.Pattern] = [
-    re.compile(r'"common_name"\s*:\s*"[a-z]{1,3}"', re.I),         # 1–3 char CN
+    re.compile(r'"common_name"\s*:\s*"[a-z]{1,3}"', re.I),         # 1-3 char CN
     re.compile(r'"organization"\s*:\s*"[a-z0-9]{1,4}"', re.I),     # very short org
     re.compile(r'"common_name"\s*:\s*"\d{4,}"', re.I),             # all-numeric CN
     re.compile(r'"common_name"\s*:\s*"android\s+debug"', re.I),    # default debug CN
@@ -611,7 +611,7 @@ _SUSPICIOUS_CERT_PATTERNS: List[re.Pattern] = [
 # ---------------------------------------------------------------------------
 
 def _perm_short(full_perm: str) -> str:
-    """android.permission.FOO → FOO"""
+    """android.permission.FOO -> FOO"""
     return full_perm.rsplit(".", 1)[-1]
 
 
@@ -727,7 +727,7 @@ def normalize_permissions(permissions: List[str]) -> List[EvidenceItem]:
     for perm in permissions:
         rule = _PERM_RULES.get(perm)
         if rule is None:
-            # Unknown permission — emit a very weak ambiguous item so the cluster still knows about it
+            # Unknown permission -- emit a very weak ambiguous item so the cluster still knows about it
             if perm.startswith("android.permission.") and _perm_short(perm) not in (
                 "INTERNET", "ACCESS_NETWORK_STATE", "ACCESS_WIFI_STATE", "VIBRATE", "WAKE_LOCK"
             ):
@@ -872,7 +872,7 @@ def normalize_components(components: Dict[str, Any]) -> List[EvidenceItem]:
                     ))
 
             # Exposed-without-permission: receiver/service with custom actions but no protection
-            # Any app on the device can send a broadcast to trigger it — classic C2 command channel
+            # Any app on the device can send a broadcast to trigger it -- classic C2 command channel
             if comp_type in ("receivers", "services") and not perm:
                 custom_actions = [
                     a for a in (filter_info.get("action", []) or [])
@@ -894,7 +894,7 @@ def normalize_components(components: Dict[str, Any]) -> List[EvidenceItem]:
                         behavior_tags=["c2_networking"],
                         explanation=(
                             f"Exported {comp_singular} responds to custom action '{action}' with no "
-                            f"android:permission guard — any app on the device can trigger it remotely"
+                            f"android:permission guard -- any app on the device can trigger it remotely"
                         ),
                         benign_alternatives="Plugin architecture, inter-app communication frameworks",
                     ))
@@ -909,7 +909,7 @@ def normalize_classes(
 ) -> List[EvidenceItem]:
     """
     Emit one EvidenceItem per class that has API-score-derived behavior tags.
-    The evidence item represents the class itself (not its strings — those come from normalize_strings).
+    The evidence item represents the class itself (not its strings -- those come from normalize_strings).
     """
     items: List[EvidenceItem] = []
     for cls_name, source in classes.items():
@@ -1002,7 +1002,7 @@ def normalize_certs(certificates: List[Dict[str, Any]]) -> List[EvidenceItem]:
         valid_to   = cert.get("valid_to")
         source_loc = "certificate"
 
-        # ── 1. Known-malicious thumbprint ─────────────────────────────────
+        # -- 1. Known-malicious thumbprint ---------------------------------
         threat = _KNOWN_MALWARE_CERT_THUMBPRINTS.get(thumbprint)
         if threat:
             items.append(EvidenceItem(
@@ -1014,10 +1014,10 @@ def normalize_certs(certificates: List[Dict[str, Any]]) -> List[EvidenceItem]:
                 strength=1.00,
                 behavior_tags=["anti_analysis"],
                 explanation=f"Certificate SHA-1 thumbprint matches known-malicious signing key used by {threat}",
-                benign_alternatives="None — named malware campaign signing cert",
+                benign_alternatives="None -- named malware campaign signing cert",
             ))
 
-        # ── 2. Self-signed ────────────────────────────────────────────────
+        # -- 2. Self-signed ------------------------------------------------
         if subject and issuer and subject == issuer:
             items.append(EvidenceItem(
                 id=make_evidence_id("cert", "self_signed", source_loc),
@@ -1031,7 +1031,7 @@ def normalize_certs(certificates: List[Dict[str, Any]]) -> List[EvidenceItem]:
                 benign_alternatives="Most independent Android apps are also self-signed",
             ))
 
-        # ── 3. Debug / test cert ──────────────────────────────────────────
+        # -- 3. Debug / test cert ------------------------------------------
         if _DEBUG_CERT_SUBJECT_PATTERN.search(subject):
             items.append(EvidenceItem(
                 id=make_evidence_id("cert", "debug_cert", source_loc),
@@ -1045,7 +1045,7 @@ def normalize_certs(certificates: List[Dict[str, Any]]) -> List[EvidenceItem]:
                 benign_alternatives="Development builds, sideloaded beta releases",
             ))
 
-        # ── 4. Suspicious subject pattern (very short CN/O) ──────────────
+        # -- 4. Suspicious subject pattern (very short CN/O) --------------
         for pat in _SUSPICIOUS_CERT_PATTERNS:
             if pat.search(subject):
                 items.append(EvidenceItem(
@@ -1056,12 +1056,12 @@ def normalize_certs(certificates: List[Dict[str, Any]]) -> List[EvidenceItem]:
                     direction="ambiguous",
                     strength=0.30,
                     behavior_tags=[],
-                    explanation="Cert subject has trivially short or numeric CN/O — typical of auto-generated malware certs",
+                    explanation="Cert subject has trivially short or numeric CN/O -- typical of auto-generated malware certs",
                     benign_alternatives="Quick-build scripts, tutorial apps",
                 ))
                 break
 
-        # ── 5. Zero / trivially small serial number ───────────────────────
+        # -- 5. Zero / trivially small serial number -----------------------
         if serial in ("0", "1", "", "00"):
             items.append(EvidenceItem(
                 id=make_evidence_id("cert", "zero_serial", source_loc),
@@ -1071,11 +1071,11 @@ def normalize_certs(certificates: List[Dict[str, Any]]) -> List[EvidenceItem]:
                 direction="ambiguous",
                 strength=0.25,
                 behavior_tags=[],
-                explanation="Certificate serial is zero or one — auto-generated with keytool defaults, common in malware",
+                explanation="Certificate serial is zero or one -- auto-generated with keytool defaults, common in malware",
                 benign_alternatives="Old keytool-generated certs sometimes use serial=1",
             ))
 
-        # ── 6. Validity period anomalies ─────────────────────────────────
+        # -- 6. Validity period anomalies ---------------------------------
         if valid_from is not None and valid_to is not None:
             try:
                 vf, vt = float(valid_from), float(valid_to)
@@ -1085,16 +1085,16 @@ def normalize_certs(certificates: List[Dict[str, Any]]) -> List[EvidenceItem]:
                     items.append(EvidenceItem(
                         id=make_evidence_id("cert", "same_day_cert", source_loc),
                         kind="cert",
-                        value="cert validity ≤ 1 day",
+                        value="cert validity <= 1 day",
                         source_location=source_loc,
                         direction="malicious",
                         strength=0.70,
                         behavior_tags=["anti_analysis"],
-                        explanation="Certificate valid for ≤ 1 day — likely auto-generated for a single campaign",
-                        benign_alternatives="None — legitimate apps need certs valid for their deployment lifetime",
+                        explanation="Certificate valid for <= 1 day -- likely auto-generated for a single campaign",
+                        benign_alternatives="None -- legitimate apps need certs valid for their deployment lifetime",
                     ))
                 elif span_days > 50 * 365:
-                    # > 50 year validity — common in automated malware cert generation
+                    # > 50 year validity -- common in automated malware cert generation
                     items.append(EvidenceItem(
                         id=make_evidence_id("cert", "extreme_validity", source_loc),
                         kind="cert",

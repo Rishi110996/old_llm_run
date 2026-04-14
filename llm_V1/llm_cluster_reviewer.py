@@ -6,7 +6,7 @@ Stage 4: context-aware LLM review of individual BehaviorClusters.
 - All clusters flagged needs_llm_review=True are reviewed in parallel via
   concurrent.futures.ThreadPoolExecutor.
 - Each prompt includes the full cross-source evidence bundle for that cluster:
-  permissions, components, class source code, strings, YARA — all at once.
+  permissions, components, class source code, strings, YARA -- all at once.
 - Model: claude-4-sonnet for all calls (best available).
 - Returns Dict[family, ClusterAssessment].
 """
@@ -43,7 +43,7 @@ FAMILY_DESCRIPTIONS: Dict[str, str] = {
     "persistence":          "Ensuring the app restarts automatically after reboot or update",
     "data_exfiltration":    "Copying contacts, SMS, location, credentials, or files to a remote server",
     "credential_theft":     "Stealing passwords via phishing overlays, custom keyboards, or keylogging",
-    "ad_analytics_only":    "Only standard advertising and analytics SDKs — no suspicious behavior",
+    "ad_analytics_only":    "Only standard advertising and analytics SDKs -- no suspicious behavior",
     "normal_app_behavior":  "Standard Android patterns consistent with a legitimate application",
 }
 
@@ -148,7 +148,7 @@ def build_cluster_prompt(
         "",
         "INSTRUCTIONS:",
         "- Evaluate whether the evidence above represents legitimate, malicious, or ambiguous behavior.",
-        "- Consider the benign_note for each item — do NOT mark as malicious if a clear legitimate explanation exists.",
+        "- Consider the benign_note for each item -- do NOT mark as malicious if a clear legitimate explanation exists.",
         "- 'malicious' = clear evidence of intentional abuse with no plausible benign explanation.",
         "- 'ambiguous' = suspicious but could be legitimate depending on app purpose.",
         "- 'benign' = all evidence has clear legitimate explanations.",
@@ -191,7 +191,7 @@ def _review_one(
     try:
         result = call_llm_fn(messages, REVIEW_MODEL, logger)
     except Exception as exc:
-        logger.warning("[cluster_review] %s failed: %s — using deterministic fallback", cluster.family, exc)
+        logger.warning("[cluster_review] %s failed: %s -- using deterministic fallback", cluster.family, exc)
         result = None
 
     if not isinstance(result, dict):
@@ -294,7 +294,7 @@ def review_clusters(
             family = future_to_family[future]
             try:
                 assessments[family] = future.result()
-                logger.info("[cluster_review] %s → %s (conf=%.2f)",
+                logger.info("[cluster_review] %s -> %s (conf=%.2f)",
                             family,
                             assessments[family].verdict,
                             assessments[family].confidence)

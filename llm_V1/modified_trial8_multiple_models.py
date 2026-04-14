@@ -39,9 +39,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 _RUNTIME_CONFIG_CACHE: Optional[Dict[str, Any]] = None
 
-# ── Runtime enrichment flags (set from CLI args at startup) ──────────────────
+# -- Runtime enrichment flags (set from CLI args at startup) ------------------
 _USE_SMBA: bool = False
 _VT_API_KEY: Optional[str] = None
+_SMBA_JSESSIONID: Optional[str] = None  # overrides .env when set via --smba-jsessionid
 
 
 @dataclass(frozen=True)
@@ -746,7 +747,7 @@ If nothing suspicious, return an empty 'evidence' and benign 'summary'.
 
 BASE_CHUNK_HEADER = """
 You are an expert Android malware analyst.
-⚠️ Default to BENIGN unless clear malicious intent exists.
+[!] Default to BENIGN unless clear malicious intent exists.
 - Sensitive permissions, reflection, crypto, ads, analytics SDKs, Firebase alone are NOT malicious.
 - strong  = clear abuse (C2, exec, dynamic load, root, SMS exfil)
 - medium  = unusual but context-dependent (Accessibility + overlay, obfuscation + network)
@@ -1092,7 +1093,7 @@ def consolidate_evidence(
         if not items:
             continue
 
-        # sort by confidence (high → low)
+        # sort by confidence (high -> low)
         items_sorted = sorted(items, key=lambda x: x.get("confidence", 0.5), reverse=True)
 
         # cap items per bucket
@@ -1224,15 +1225,15 @@ def final_llm_verdict(
                 "- Strings and classes analysis\n"
                 "- Consolidated evidence grouped by strength\n"
                 "- Extracted IOCs\n\n"
-                "⚠️ Your job is to evaluate ALL the evidence objectively and decide the most accurate classification.\n"
-                "- Do NOT assume Clean or Malicious by default — base your decision only on evidence.\n"
+                "[!] Your job is to evaluate ALL the evidence objectively and decide the most accurate classification.\n"
+                "- Do NOT assume Clean or Malicious by default -- base your decision only on evidence.\n"
                 "- Legitimate apps may use sensitive permissions, networking, crypto, reflection, or ads/Firebase. These alone are NOT malicious.\n"
                 "- Mark as Malicious ONLY if there is undeniable malicious evidence such as:\n"
-                "  • Hardcoded C2 domains or IPs (not common cloud/CDN)\n"
-                "  • Runtime exec, su/root checks, privilege escalation\n"
-                "  • Dynamic payload loading (DexClassLoader, PathClassLoader, eval, exec)\n"
-                "  • Obfuscation/anti-analysis combined with abuse\n"
-                "  • SMS/call interception, credential stealing, overlay attacks, data exfiltration\n"
+                "  * Hardcoded C2 domains or IPs (not common cloud/CDN)\n"
+                "  * Runtime exec, su/root checks, privilege escalation\n"
+                "  * Dynamic payload loading (DexClassLoader, PathClassLoader, eval, exec)\n"
+                "  * Obfuscation/anti-analysis combined with abuse\n"
+                "  * SMS/call interception, credential stealing, overlay attacks, data exfiltration\n"
                 "- Mark as Suspicious if there are unusual or clustered risky patterns suggesting possible abuse but without conclusive proof.\n"
                 "- Mark as Clean if no malicious evidence exists.\n\n"
                 "Return STRICT JSON in this schema:\n"
@@ -1267,7 +1268,7 @@ def final_llm_verdict(
 # -------------------- PIPELINE --------------------
 def analyze_apk_pipeline(apk_path, logger, llm_client: OpenAI):
     """
-    Thin wrapper — delegates to apk_pipeline_v2.run().
+    Thin wrapper -- delegates to apk_pipeline_v2.run().
     Enrichment flags (use_smba, vt_api_key) are read from module-level globals
     set by the CLI argument parser at startup.
     """
@@ -1276,6 +1277,7 @@ def analyze_apk_pipeline(apk_path, logger, llm_client: OpenAI):
         logger,
         llm_client,
         use_smba=_USE_SMBA,
+        smba_jsessionid=_SMBA_JSESSIONID or "",
         vt_api_key=_VT_API_KEY,
         no_vt_detection=_NO_VT_DETECTION,
     )
@@ -1483,7 +1485,7 @@ def run_single_runner(
     lease_duration_sec: float,
     worker_mode: bool,
 ) -> int:
-    # Tool registry removed in v2 — extraction is handled directly in apk_pipeline_v2.
+    # Tool registry removed in v2 -- extraction is handled directly in apk_pipeline_v2.
 
     apk_files = sorted(f for f in os.listdir(folder_path) if isapk(folder_path + os.sep + f))
     if not apk_files:
@@ -1735,7 +1737,18 @@ if __name__ == "__main__":
         default=False,
         help=(
             "Enrich analysis with Zscaler SMBA sandbox data. "
-            "Requires ZSCALER_JSESSIONID to be set in llm_V1/smba_data_pull/.env"
+            "Requires ZSCALER_JSESSIONID via --smba-jsessionid or llm_V1/smba_data_pull/.env"
+        ),
+    )
+    parser.add_argument(
+        "--smba-jsessionid",
+        default=None,
+        metavar="JSESSIONID",
+        help=(
+            "Zscaler SMBA JSESSIONID cookie value. "
+            "Overrides the ZSCALER_JSESSIONID value in smba_data_pull/.env. "
+            "Use this when the session has expired and you need to paste a fresh token. "
+            "Example: --smba-jsessionid ABCDEF1234567890"
         ),
     )
     parser.add_argument(
@@ -1759,6 +1772,29 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     _USE_SMBA = bool(args.use_smba)
+    if getattr(args, "smba_jsessionid", None):
+        _SMBA_JSESSIONID = str(args.smba_jsessionid).strip()
+        # Write the fresh session ID into .env so smba_enrichment picks it up.
+        _smba_env_path = os.path.join(SCRIPT_DIR, "smba_data_pull", ".env")
+        try:
+            _env_lines = []
+            _found = False
+            if os.path.isfile(_smba_env_path):
+                with open(_smba_env_path, "r", encoding="utf-8") as _ef:
+                    for _line in _ef:
+                        if _line.startswith("ZSCALER_JSESSIONID="):
+                            _env_lines.append(f"ZSCALER_JSESSIONID={_SMBA_JSESSIONID}\n")
+                            _found = True
+                        else:
+                            _env_lines.append(_line)
+            if not _found:
+                _env_lines.append(f"ZSCALER_JSESSIONID={_SMBA_JSESSIONID}\n")
+            with open(_smba_env_path, "w", encoding="utf-8") as _ef:
+                _ef.writelines(_env_lines)
+            print(f"[startup] SMBA JSESSIONID updated in {_smba_env_path}")
+        except Exception as _env_exc:
+            print(f"[startup] WARNING: could not update .env with new JSESSIONID: {_env_exc}")
+            print(f"[startup] SMBA will use the token directly from --smba-jsessionid")
     _NO_VT_DETECTION = bool(args.no_vt_detection)
     if args.vt_enrich:
         import vt_enrichment as _vt_mod
