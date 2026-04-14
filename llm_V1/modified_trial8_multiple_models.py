@@ -743,7 +743,7 @@ If nothing suspicious, return an empty 'evidence' and benign 'summary'.
 
 BASE_CHUNK_HEADER = """
 You are an expert Android malware analyst.
-⚠️ Default to BENIGN unless clear malicious intent exists.
+ΓÜá∩╕Å Default to BENIGN unless clear malicious intent exists.
 - Sensitive permissions, reflection, crypto, ads, analytics SDKs, Firebase alone are NOT malicious.
 - strong  = clear abuse (C2, exec, dynamic load, root, SMS exfil)
 - medium  = unusual but context-dependent (Accessibility + overlay, obfuscation + network)
@@ -1089,7 +1089,7 @@ def consolidate_evidence(
         if not items:
             continue
 
-        # sort by confidence (high → low)
+        # sort by confidence (high ΓåÆ low)
         items_sorted = sorted(items, key=lambda x: x.get("confidence", 0.5), reverse=True)
 
         # cap items per bucket
@@ -1221,15 +1221,15 @@ def final_llm_verdict(
                 "- Strings and classes analysis\n"
                 "- Consolidated evidence grouped by strength\n"
                 "- Extracted IOCs\n\n"
-                "⚠️ Your job is to evaluate ALL the evidence objectively and decide the most accurate classification.\n"
-                "- Do NOT assume Clean or Malicious by default — base your decision only on evidence.\n"
+                "ΓÜá∩╕Å Your job is to evaluate ALL the evidence objectively and decide the most accurate classification.\n"
+                "- Do NOT assume Clean or Malicious by default ΓÇö base your decision only on evidence.\n"
                 "- Legitimate apps may use sensitive permissions, networking, crypto, reflection, or ads/Firebase. These alone are NOT malicious.\n"
                 "- Mark as Malicious ONLY if there is undeniable malicious evidence such as:\n"
-                "  • Hardcoded C2 domains or IPs (not common cloud/CDN)\n"
-                "  • Runtime exec, su/root checks, privilege escalation\n"
-                "  • Dynamic payload loading (DexClassLoader, PathClassLoader, eval, exec)\n"
-                "  • Obfuscation/anti-analysis combined with abuse\n"
-                "  • SMS/call interception, credential stealing, overlay attacks, data exfiltration\n"
+                "  ΓÇó Hardcoded C2 domains or IPs (not common cloud/CDN)\n"
+                "  ΓÇó Runtime exec, su/root checks, privilege escalation\n"
+                "  ΓÇó Dynamic payload loading (DexClassLoader, PathClassLoader, eval, exec)\n"
+                "  ΓÇó Obfuscation/anti-analysis combined with abuse\n"
+                "  ΓÇó SMS/call interception, credential stealing, overlay attacks, data exfiltration\n"
                 "- Mark as Suspicious if there are unusual or clustered risky patterns suggesting possible abuse but without conclusive proof.\n"
                 "- Mark as Clean if no malicious evidence exists.\n\n"
                 "Return STRICT JSON in this schema:\n"
@@ -1321,7 +1321,7 @@ def analyze_apk_pipeline(apk_path, logger, llm_client: OpenAI):
     #             "explanation": data["summary_explanation"]
     #         })
 
-    # 7. Adjudicate → preliminary verdict + risk + IOCs
+    # 7. Adjudicate ΓåÆ preliminary verdict + risk + IOCs
     prelim, risk, iocs = adjudicate(consolidated)
 
     # 8. Final LLM refinement (pass consolidated instead of raw)
@@ -1559,6 +1559,7 @@ def run_single_runner(
     master_log_path = os.path.join(report_dir, master_log_name)
     run_counts = {"done": 0, "failed": 0, "corrupt": 0, "skipped": 0}
     first_pass = True
+    _contention_wait_start: Optional[float] = None
 
     print(f"[runner:{runner_id}] starting with key={llm_key_config.name}")
     with open(master_log_path, "a", encoding="utf-8") as master_log:
@@ -1570,11 +1571,12 @@ def run_single_runner(
         while True:
             pass_completed = 0
             pass_contended = 0
+            pass_skipped = 0
             key_unavailable = False
 
             for apk_file in apk_files:
                 apk_path = os.path.join(folder_path, apk_file)
-                print(f"\n[runner:{runner_id}] [📦 Processing APK: {apk_file}]")
+                print(f"\n[runner:{runner_id}] [≡ƒôª Processing APK: {apk_file}]")
                 status = analyze_sample_with_state(
                     apk_path=apk_path,
                     report_dir=report_dir,
@@ -1604,8 +1606,10 @@ def run_single_runner(
                     pass_contended += 1
                     continue
 
-                if first_pass and status == "skipped_terminal":
-                    run_counts["skipped"] += 1
+                if status == "skipped_terminal":
+                    if first_pass:
+                        run_counts["skipped"] += 1
+                    pass_skipped += 1
 
             first_pass = False
 
@@ -1633,17 +1637,61 @@ def run_single_runner(
                 return RUNNER_KEY_UNAVAILABLE_EXIT_CODE
 
             if pass_completed > 0:
+                # Made real progress; reset contention timer.
+                _contention_wait_start = None
                 continue
 
-            if pass_contended > 0:
-                print(
-                    f"[runner:{runner_id}] waiting {WORKER_RESCAN_SLEEP_SEC:.1f}s for "
-                    f"{pass_contended} sample(s) currently owned by other runners"
-                )
-                time.sleep(WORKER_RESCAN_SLEEP_SEC)
-                continue
+            # No new completions. If nothing is contended, we are done.
+            if pass_contended == 0:
+                break
 
-            break
+            # Some samples are claimed by other runners.
+            if _contention_wait_start is None:
+                _contention_wait_start = time.monotonic()
+
+            waited_sec = time.monotonic() - _contention_wait_start
+
+            # Once waited longer than the full lease window, the owning
+            # runner is almost certainly dead. Force-fail any in_progress
+            # rows whose lease has already expired so we can reclaim them.
+            if waited_sec >= lease_duration_sec:
+                now_iso = utc_now_iso()
+                try:
+                    with state_db._connect() as _conn:
+                        _cur = _conn.execute(
+                            """
+                            UPDATE analysis_samples
+                            SET status = 'failed',
+                                last_error = 'force-failed: lease expired, owning runner presumed dead',
+                                runner_id = NULL,
+                                lease_expires_at_utc = NULL,
+                                finished_at_utc = ?
+                            WHERE status = 'in_progress'
+                              AND COALESCE(lease_expires_at_utc, '') <= ?;
+                            """,
+                            (now_iso, now_iso),
+                        )
+                        _conn.commit()
+                        n_recovered = int(_cur.rowcount or 0)
+                    if n_recovered > 0:
+                        print(
+                            f"[runner:{runner_id}] recovered {n_recovered} sample(s) "
+                            "whose lease expired (dead runner) -- will retry them"
+                        )
+                        _contention_wait_start = None
+                        continue
+                except Exception as _exc:
+                    print(f"[runner:{runner_id}] dead-runner recovery failed: {_exc}")
+
+            print(
+                f"[runner:{runner_id}] waiting {WORKER_RESCAN_SLEEP_SEC:.1f}s for "
+                f"{pass_contended} sample(s) currently owned by other runners "
+                f"(waited {waited_sec:.0f}s / lease={lease_duration_sec:.0f}s)"
+            )
+            time.sleep(WORKER_RESCAN_SLEEP_SEC)
+            continue
+
+            break  # unreachable; kept for clarity
 
     counts = state_db.status_counts()
     summary_name = (
