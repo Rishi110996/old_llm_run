@@ -50,6 +50,7 @@ ALWAYS_REVIEW_FAMILIES: Set[str] = {
 # evidence kinds, ordered from highest-level (manifest) to lowest-level (yara)
 _KIND_ORDER = [
     "permission",
+    "basic_info",
     "component",
     "cert",
     "native_lib",

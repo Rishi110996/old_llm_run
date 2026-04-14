@@ -92,6 +92,8 @@ def build_cluster_prompt(
         else:
             other_items.append(item)
 
+    string_items.sort(key=lambda item: (item.strength, item.direction == "malicious"), reverse=True)
+
     for item in other_items:
         evidence_lines.append(_format_item(item, include_class_source=True, classes=apk_facts.classes))
 

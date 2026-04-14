@@ -32,7 +32,7 @@ class EvidenceItem:
     direction and strength are set by deterministic rule tables, never by the LLM.
     """
     id: str
-    kind: str               # permission | string | class | component | native_lib | yara | cert
+    kind: str               # permission | basic_info | string | class | component | native_lib | yara | cert
     value: str              # the raw extracted value
     source_location: str    # "permissions" | "component:ClassName" | "class:ClassName" | "yara" | …
     direction: str          # "malicious" | "benign" | "ambiguous"

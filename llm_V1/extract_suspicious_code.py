@@ -229,6 +229,18 @@ class APKAnalyzer:
         (re.compile(r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", re.I), 0.80, ["c2_networking"]),
         (re.compile(r"\b(?:[a-z0-9-]+\.(?:ru|cn|su|top|tk|pw|xyz|kim|click|biz|info))\b", re.I), 0.50, ["c2_networking"]),
         (re.compile(r"https?://[^\s\"']{10,}\.php", re.I), 0.50, ["c2_networking"]),
+        (re.compile(r"https?://api\.telegram\.org/bot\d{7,12}:[A-Za-z0-9_-]{35}", re.I), 0.95, ["c2_networking"]),
+        (re.compile(r"pastebin\.com/raw/|paste\.ee/r/|hastebin\.com/raw/|rentry\.co/", re.I), 0.75, ["c2_networking"]),
+        (
+            re.compile(
+                r"com\.(?:chase|bankofamerica|wellsfargo|citibank|hsbc|barclays|"
+                r"natwest|santander|lloydsbank|ing(?:direct)?|bnpparibas|societegenerale|"
+                r"commerzbank|deutschebank|jpmorgan|usbank)\b",
+                re.I,
+            ),
+            0.85,
+            ["overlay_fraud", "credential_theft"],
+        ),
         (re.compile(r"\b(?:DexClassLoader|PathClassLoader|InMemoryDexClassLoader)\b"), 0.85, ["dynamic_code_loading"]),
         (re.compile(r"/bin/sh|/system/bin/sh|cmd\.exe", re.I), 0.85, ["privilege_escalation"]),
         (re.compile(r"\bsu\b"), 0.80, ["privilege_escalation"]),
@@ -448,6 +460,33 @@ class APKAnalyzer:
         list_susp_classes.extend(self._get_susp_classes(services))
         return list_susp_classes
 
+    def _get_application_class_name(self) -> str:
+        application_class = self.apk_data.get("app_class")
+        if not application_class:
+            return ""
+        return f"L{application_class.replace('.', '/')};"
+
+    def _class_priority(self, cls_name: str) -> int:
+        priority = 0
+        if cls_name == self._get_application_class_name():
+            priority += 3
+
+        for cls_obj in self.analysis.find_classes(name=cls_name, no_external=True):
+            method_names = {
+                m.method.get_name()
+                for m in cls_obj.get_methods()
+                if hasattr(m, "method") and m.method is not None
+            }
+            if "attachBaseContext" in method_names:
+                priority += 4
+            if "onCreate" in method_names:
+                priority += 2
+            if "onStartCommand" in method_names or "doInBackground" in method_names:
+                priority += 1
+            break
+
+        return priority
+
     def extract_relevant_strings(self,max_depth):
         instr_strings = []
         if self._susp_classes:
@@ -631,8 +670,12 @@ class APKAnalyzer:
         """
         # Sort by score descending
         ordered = sorted(
-            [(name, s) for name, s in scores.items() if s >= self.MIN_CLASS_SCORE_FOR_DECOMPILE],
-            key=lambda x: x[1],
+            [
+                (name, s)
+                for name, s in scores.items()
+                if s >= self.MIN_CLASS_SCORE_FOR_DECOMPILE or self._should_force_decompile(name, s)
+            ],
+            key=lambda x: (self._class_priority(x[0]), x[1]),
             reverse=True,
         )
 
@@ -668,6 +711,29 @@ class APKAnalyzer:
                 break
 
         return decompiled
+
+    def _should_force_decompile(self, cls_name: str, score: float) -> bool:
+        """
+        Force a small set of bootstrap classes into the decompile queue when they
+        already have some non-zero suspicion score. This keeps attachBaseContext
+        and Application bootstrap code from falling below the normal budget floor.
+        """
+        if score <= 0:
+            return False
+
+        app_class = self._get_application_class_name()
+        if cls_name == app_class:
+            return True
+
+        for cls_obj in self.analysis.find_classes(name=cls_name, no_external=True):
+            method_names = {
+                m.method.get_name()
+                for m in cls_obj.get_methods()
+                if hasattr(m, "method") and m.method is not None
+            }
+            return "attachBaseContext" in method_names
+
+        return False
 
     def extract_strings_from_scored_classes(
         self,

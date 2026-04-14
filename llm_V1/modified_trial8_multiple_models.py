@@ -1758,7 +1758,6 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
-    global _USE_SMBA, _VT_API_KEY, _NO_VT_DETECTION
     _USE_SMBA = bool(args.use_smba)
     _NO_VT_DETECTION = bool(args.no_vt_detection)
     if args.vt_enrich:

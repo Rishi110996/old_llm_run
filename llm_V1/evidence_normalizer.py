@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 
 from evidence_schema import APKFacts, EvidenceItem, make_evidence_id
 
@@ -480,9 +480,98 @@ _COMPONENT_META_RULES: Dict[str, Tuple[str, float, List[str], str, str]] = {
 _KNOWN_BENIGN_NATIVE_PATTERNS = re.compile(
     r"(webrtc|opus|avcodec|openal|unity|cocos|gdb|lldb|flutter|"
     r"chromium|v8|angle|egl|skia|ffmpeg|libc\+\+|libjpeg|libpng|"
-    r"zlib|sqlite|tflite|onnx|realm|mupdf)",
+    r"zlib|sqlite|tflite|onnx|realm|mupdf|rootbeer|sqlcipher|"
+    r"boringssl|conscrypt|reactnativejni|hermes|jsc|pdfium)",
     re.I,
 )
+
+_SUSPICIOUS_NATIVE_LIB_RULES: List[Tuple[re.Pattern, str, float, List[str], str, str]] = [
+    (
+        re.compile(r"(frida|xposed|substrate|zygisk|magisk)", re.I),
+        "malicious",
+        0.90,
+        ["anti_analysis", "privilege_escalation"],
+        "Native library name references a hooking/root framework often used for runtime tampering or sandbox evasion",
+        "Security research tools or red-team utilities bundled inside the app",
+    ),
+    (
+        re.compile(r"(inject|inlinehook|hook|intercept|trampoline|patcher)", re.I),
+        "ambiguous",
+        0.72,
+        ["anti_analysis", "privilege_escalation"],
+        "Native library name suggests code hooking or process injection capability",
+        "Instrumentation SDKs, compatibility shims, or game-mod frameworks",
+    ),
+    (
+        re.compile(r"(dexloader|classloader|loader|payload|dropper|unpack|packer)", re.I),
+        "ambiguous",
+        0.68,
+        ["dynamic_code_loading", "anti_analysis"],
+        "Native library name suggests staged payload loading or unpacking outside normal DEX inspection",
+        "Hot-update frameworks or commercial packers",
+    ),
+    (
+        re.compile(r"(daemon|watchdog|keepalive|servicecore|bot|backdoor|rat)", re.I),
+        "ambiguous",
+        0.64,
+        ["persistence", "c2_networking"],
+        "Native library name suggests background persistence or remote-control support",
+        "Internal service helper libraries with unusually aggressive naming",
+    ),
+    (
+        re.compile(r"(keylog|overlay|bank|cred|steal|grabber|exfil)", re.I),
+        "malicious",
+        0.78,
+        ["credential_theft", "overlay_fraud", "data_exfiltration"],
+        "Native library name directly references credential theft, overlays, or exfiltration behavior",
+        "Test fixtures or intentionally named research samples",
+    ),
+]
+
+_SDK_ELEVATION_PERMISSIONS = {
+    "android.permission.RECEIVE_SMS",
+    "android.permission.READ_SMS",
+    "android.permission.SEND_SMS",
+    "android.permission.READ_PHONE_STATE",
+    "android.permission.READ_CONTACTS",
+    "android.permission.WRITE_CONTACTS",
+    "android.permission.RECORD_AUDIO",
+    "android.permission.CAMERA",
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+    "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.READ_CALL_LOG",
+    "android.permission.PROCESS_OUTGOING_CALLS",
+    "android.permission.ANSWER_PHONE_CALLS",
+}
+
+_PACKAGE_TYPOSQUAT_RULES: List[Tuple[re.Pattern, str, float, List[str], str, str]] = [
+    (
+        re.compile(r"^com\.google\.play\.services(?:\..+)?$", re.I),
+        "malicious",
+        0.82,
+        ["overlay_fraud", "credential_theft"],
+        "Package name impersonates Google Play Services; malware often borrows this namespace to appear trusted",
+        "None for third-party APKs — the canonical Play Services package is com.google.android.gms",
+    ),
+    (
+        re.compile(r"^com\.android\.(?:settings|system|systemui|update|security|packageinstaller)(?:\..+)?$", re.I),
+        "ambiguous",
+        0.72,
+        ["overlay_fraud", "credential_theft"],
+        "Package name imitates a core Android system component to gain user trust",
+        "OEM/system apps signed by the device vendor",
+    ),
+    (
+        re.compile(r"^com\.(?:andriod|anroid|goog1e|gooogle|g00gle)\.", re.I),
+        "malicious",
+        0.80,
+        ["overlay_fraud", "credential_theft"],
+        "Package name uses a typo-squatted trusted brand namespace",
+        "None — the misspelling itself is a deception signal",
+    ),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +613,113 @@ _SUSPICIOUS_CERT_PATTERNS: List[re.Pattern] = [
 def _perm_short(full_perm: str) -> str:
     """android.permission.FOO → FOO"""
     return full_perm.rsplit(".", 1)[-1]
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    try:
+        if value is None or value == "":
+            return None
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_permission_tags(permissions: List[str]) -> List[str]:
+    tags: List[str] = []
+    for perm in permissions:
+        rule = _PERM_RULES.get(perm)
+        if rule is None:
+            continue
+        for tag in rule[2]:
+            if tag not in tags:
+                tags.append(tag)
+    return tags
+
+
+def normalize_basic_info(
+    basic_info: Dict[str, Any],
+    permissions: List[str],
+) -> List[EvidenceItem]:
+    items: List[EvidenceItem] = []
+    package_name = str(basic_info.get("package_name") or "").strip()
+    min_sdk = _safe_int(basic_info.get("min_sdk"))
+    target_sdk = _safe_int(basic_info.get("target_sdk"))
+
+    risky_permissions = sorted(set(permissions) & _SDK_ELEVATION_PERMISSIONS)
+    risky_tags = _collect_permission_tags(risky_permissions)
+
+    if target_sdk is not None and target_sdk < 23:
+        strength = 0.40
+        direction = "ambiguous"
+        explanation = (
+            f"Legacy targetSdkVersion={target_sdk} lets the app avoid Android 6+ runtime permission prompts"
+        )
+        if risky_permissions:
+            strength = 0.58 if target_sdk <= 22 else 0.48
+            explanation += (
+                f" while still requesting high-risk permissions such as {', '.join(_perm_short(p) for p in risky_permissions[:4])}"
+            )
+        items.append(EvidenceItem(
+            id=make_evidence_id("basic_info", f"target_sdk:{target_sdk}", "basic_info:target_sdk"),
+            kind="basic_info",
+            value=f"targetSdkVersion={target_sdk}",
+            source_location="basic_info:target_sdk",
+            direction=direction,
+            strength=strength,
+            behavior_tags=risky_tags or ["anti_analysis"],
+            explanation=explanation,
+            benign_alternatives="Legitimate legacy apps that have not been modernized for recent Android permission behavior",
+        ))
+
+    if min_sdk is not None and min_sdk <= 16:
+        items.append(EvidenceItem(
+            id=make_evidence_id("basic_info", f"min_sdk:{min_sdk}", "basic_info:min_sdk"),
+            kind="basic_info",
+            value=f"minSdkVersion={min_sdk}",
+            source_location="basic_info:min_sdk",
+            direction="ambiguous",
+            strength=0.32,
+            behavior_tags=["anti_analysis"],
+            explanation="Very old minSdkVersion indicates compatibility with pre-runtime-permission Android builds often favored by broad-compatibility malware",
+            benign_alternatives="Apps intentionally supporting very old Android devices",
+        ))
+
+    if (
+        min_sdk is not None
+        and target_sdk is not None
+        and target_sdk < 23
+        and min_sdk <= 16
+    ):
+        items.append(EvidenceItem(
+            id=make_evidence_id("basic_info", "legacy_sdk_combo", "basic_info:sdk_combo"),
+            kind="basic_info",
+            value=f"legacy_sdk_combo(min={min_sdk}, target={target_sdk})",
+            source_location="basic_info:sdk_combo",
+            direction="ambiguous",
+            strength=0.48,
+            behavior_tags=risky_tags or ["anti_analysis"],
+            explanation="Combination of very old minSdkVersion and legacy targetSdkVersion maximizes device reach while retaining pre-Marshmallow permission behavior",
+            benign_alternatives="Old enterprise or long-tail consumer apps with unusually broad backwards compatibility requirements",
+        ))
+
+    if package_name:
+        for pattern, direction, strength, tags, explanation, benign_alts in _PACKAGE_TYPOSQUAT_RULES:
+            if not pattern.search(package_name):
+                continue
+            items.append(EvidenceItem(
+                id=make_evidence_id("basic_info", package_name, "basic_info:package_name"),
+                kind="basic_info",
+                value=package_name,
+                source_location="basic_info:package_name",
+                direction=direction,
+                strength=strength,
+                behavior_tags=tags,
+                explanation=explanation,
+                benign_alternatives=benign_alts,
+            ))
+            break
+
+    return items
 
 
 def normalize_permissions(permissions: List[str]) -> List[EvidenceItem]:
@@ -751,6 +947,33 @@ def normalize_native_libs(native_libs: List[str]) -> List[EvidenceItem]:
         lib_name = lib_path.split("/")[-1]
         if _KNOWN_BENIGN_NATIVE_PATTERNS.search(lib_name):
             continue
+        lib_stem = lib_name
+        if lib_stem.lower().startswith("lib"):
+            lib_stem = lib_stem[3:]
+        if lib_stem.lower().endswith(".so"):
+            lib_stem = lib_stem[:-3]
+
+        matched_rule = None
+        for rule in _SUSPICIOUS_NATIVE_LIB_RULES:
+            if rule[0].search(lib_stem):
+                matched_rule = rule
+                break
+
+        if matched_rule is not None:
+            _, direction, strength, tags, explanation, benign_alternatives = matched_rule
+            items.append(EvidenceItem(
+                id=make_evidence_id("native_lib", lib_path, f"native_lib:{lib_name}"),
+                kind="native_lib",
+                value=lib_path,
+                source_location=f"native_lib:{lib_name}",
+                direction=direction,
+                strength=strength,
+                behavior_tags=tags,
+                explanation=explanation,
+                benign_alternatives=benign_alternatives,
+            ))
+            continue
+
         items.append(EvidenceItem(
             id=make_evidence_id("native_lib", lib_path, f"native_lib:{lib_name}"),
             kind="native_lib",
@@ -909,6 +1132,7 @@ def normalize_certs(certificates: List[Dict[str, Any]]) -> List[EvidenceItem]:
 def normalize_all(apk_facts: APKFacts) -> List[EvidenceItem]:
     """Convert all APKFacts into a flat list of EvidenceItems."""
     items: List[EvidenceItem] = []
+    items.extend(normalize_basic_info(apk_facts.basic_info, apk_facts.permissions))
     items.extend(normalize_permissions(apk_facts.permissions))
     items.extend(normalize_strings(apk_facts.strings))
     items.extend(normalize_components(apk_facts.components))
