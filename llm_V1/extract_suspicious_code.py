@@ -249,6 +249,62 @@ class APKAnalyzer:
         (re.compile(r"\bchmod\s+[0-7]{3}", re.I), 0.80, ["privilege_escalation"]),
     ]
 
+    MAX_STRINGS_PER_CLASS: int = 40
+
+    _SDK_NOISE_STRING_RE = re.compile(
+        r"^(?:"
+        r"androidx?\."
+        r"|kotlinx?\."
+        r"|okhttp3(?:\.|$)"
+        r"|okio(?:\.|$)"
+        r"|retrofit2(?:\.|$)"
+        r"|org\.(?:apache|json|xml|w3c|slf4j)\."
+        r"|com\.google\.(?:android\.gms|firebase|ads|gson)\."
+        r"|com\.squareup\."
+        r"|com\.fasterxml\.jackson\."
+        r"|com\.(?:facebook(?:\.appevents)?|mopub|inmobi|unity3d\.ads|chartboost|applovin)\."
+        r"|com\.(?:ironsource|vungle|startapp|flurry|adjust)\."
+        r"|com\.(?:paypal|stripe|braintreepayments)\."
+        r")",
+        re.I,
+    )
+
+    _RESOURCE_NOISE_RE = re.compile(
+        r"^(?:res/|META-INF/|assets/[^\s]+\.(?:png|jpg|jpeg|gif|webp|xml|wav|mp3|ttf|otf|svg))",
+        re.I,
+    )
+
+    _LOW_VALUE_HASHLIKE_RE = re.compile(r"^(?:[0-9a-f]{32,})$", re.I)
+    _LOW_VALUE_BASE64_RE = re.compile(r"^[A-Za-z0-9+/]{80,}={0,2}$")
+
+    _KEEP_SIGNAL_PATTERNS: Tuple[re.Pattern, ...] = (
+        re.compile(r"https?://[^\s\"']{10,}", re.I),
+        re.compile(r"(?<![/\w])classes\.dex\b", re.I),
+        re.compile(r"(?<![/\w])[\w\-]+\.dex\b", re.I),
+        re.compile(r"\b(?:genymotion|bluestacks|nox|youwave|memu)\b", re.I),
+        re.compile(r"\bDebugger\.isAttached\b|\bis_debuggable\b|\bdebuggerConnected\b", re.I),
+        re.compile(r"\bgetCurrentInputConnection\b|\bcommitText\b"),
+    )
+
+    _BOOTSTRAP_HINT_PATTERNS: Tuple[re.Pattern, ...] = (
+        re.compile(r"https?://|content://|file://", re.I),
+        re.compile(r"(?:/system/|/data/data/|/sdcard/|/proc/|/dev/|/bin/)", re.I),
+        re.compile(r"\b(?:com|org|net|io|android)\.[A-Za-z0-9_.$]{4,}\b"),
+        re.compile(r"android\.permission\.|android\.intent\.action\.|android\.provider\.Telephony\.", re.I),
+        re.compile(r"\b(?:DexClassLoader|PathClassLoader|InMemoryDexClassLoader|BaseDexClassLoader)\b"),
+        re.compile(r"\b(?:Runtime\.getRuntime|ProcessBuilder|SSLContext|TrustManager|Xposed)\b"),
+        re.compile(r"\b(?:su|chmod|mount|appops|pm\s|am\s|settings\s+put)\b", re.I),
+        re.compile(r"\.(?:apk|dex|jar|so|bin|dat|json|php)\b", re.I),
+        re.compile(r"(?:\d{1,3}\.){3}\d{1,3}"),
+    )
+
+    IMPORTANT_METHOD_PRIORITIES = {
+        "attachBaseContext": 40,
+        "onCreate": 28,
+        "onStartCommand": 22,
+        "doInBackground": 16,
+    }
+
     # Budget cap: stop decompiling after this many bytes of source code
     MAX_SOURCE_BUDGET_BYTES: int = 55_000
     # Floor: skip decompiling classes below this score
@@ -477,15 +533,66 @@ class APKAnalyzer:
                 for m in cls_obj.get_methods()
                 if hasattr(m, "method") and m.method is not None
             }
-            if "attachBaseContext" in method_names:
-                priority += 4
-            if "onCreate" in method_names:
-                priority += 2
-            if "onStartCommand" in method_names or "doInBackground" in method_names:
-                priority += 1
+            for method_name in method_names:
+                priority += self._method_priority(method_name)
             break
 
         return priority
+
+    def _method_priority(self, method_name: str) -> int:
+        return self.IMPORTANT_METHOD_PRIORITIES.get(method_name, 0)
+
+    def _matches_high_signal_string(self, value: str) -> bool:
+        if self.SUSP_STRING_PATTERNS.search(value):
+            return True
+        for pat, _, _ in self.SUSPICIOUS_STR_SCORE:
+            if pat.search(value):
+                return True
+        for pat in self._KEEP_SIGNAL_PATTERNS:
+            if pat.search(value):
+                return True
+        return False
+
+    def _matches_bootstrap_hint(self, value: str) -> bool:
+        for pat in self._BOOTSTRAP_HINT_PATTERNS:
+            if pat.search(value):
+                return True
+        return False
+
+    def _is_probably_noise_string(self, value: str) -> bool:
+        text = value.strip()
+        if len(text) < 4:
+            return True
+        if len(text) > 280:
+            return True
+        if self._SDK_NOISE_STRING_RE.search(text):
+            return True
+        if self._RESOURCE_NOISE_RE.search(text):
+            return True
+
+        printable = sum(32 <= ord(ch) < 127 for ch in text)
+        if printable < max(3, int(len(text) * 0.85)):
+            return True
+
+        alpha = sum(ch.isalpha() for ch in text)
+        digit = sum(ch.isdigit() for ch in text)
+        if alpha + digit < 3:
+            return True
+
+        # Bare MD5/SHA1/SHA256-style digests are extremely common in encrypted
+        # Android malware samples and usually contribute noise, not semantics.
+        if self._LOW_VALUE_HASHLIKE_RE.fullmatch(text):
+            return True
+
+        # Long opaque Base64 blobs are kept only when another bootstrap hint
+        # justifies them; otherwise they crowd out more useful URLs/commands.
+        if self._LOW_VALUE_BASE64_RE.fullmatch(text):
+            return True
+
+        if text.count(" ") >= 8 and not self._matches_bootstrap_hint(text):
+            return True
+
+        return False
 
     def extract_relevant_strings(self,max_depth):
         instr_strings = []
@@ -668,12 +775,30 @@ class APKAnalyzer:
 
         Returns {class_name: decompiled_source}
         """
-        # Sort by score descending
+        # Sort by score descending, but also include a tiny bootstrap set even
+        # when those classes currently have zero score.
+        candidate_names = set(scores.keys())
+        app_class = self._get_application_class_name()
+        if app_class:
+            candidate_names.add(app_class)
+        for class_obj in self.analysis.get_classes():
+            cls_name = class_obj.name
+            if cls_name.startswith(self.SAFE_CLASSES):
+                continue
+            method_names = {
+                m.method.get_name()
+                for m in class_obj.get_methods()
+                if hasattr(m, "method") and m.method is not None
+            }
+            if "attachBaseContext" in method_names:
+                candidate_names.add(cls_name)
+
         ordered = sorted(
             [
-                (name, s)
-                for name, s in scores.items()
-                if s >= self.MIN_CLASS_SCORE_FOR_DECOMPILE or self._should_force_decompile(name, s)
+                (name, scores.get(name, 0.0))
+                for name in candidate_names
+                if scores.get(name, 0.0) >= self.MIN_CLASS_SCORE_FOR_DECOMPILE
+                or self._should_force_decompile(name, scores.get(name, 0.0))
             ],
             key=lambda x: (self._class_priority(x[0]), x[1]),
             reverse=True,
@@ -715,12 +840,9 @@ class APKAnalyzer:
     def _should_force_decompile(self, cls_name: str, score: float) -> bool:
         """
         Force a small set of bootstrap classes into the decompile queue when they
-        already have some non-zero suspicion score. This keeps attachBaseContext
-        and Application bootstrap code from falling below the normal budget floor.
+        have low or even zero current score. This keeps attachBaseContext and
+        Application bootstrap code from falling below the normal budget floor.
         """
-        if score <= 0:
-            return False
-
         app_class = self._get_application_class_name()
         if cls_name == app_class:
             return True
@@ -741,17 +863,28 @@ class APKAnalyzer:
     ) -> Dict[str, List[str]]:
         """
         Extract const-string values from the budget-selected classes only.
-        Returns {class_name: [string, …]}.
+        Keeps high-signal strings plus a small set of bootstrap-relevant strings
+        from key methods like attachBaseContext/onCreate.
+
+        Returns {class_name: [string, ...]}.
         """
         result: Dict[str, List[str]] = {}
+        application_class = self._get_application_class_name()
+
         for cls_name in selected_class_names:
-            strs: List[str] = []
+            ranked_strings: Dict[str, Tuple[int, int]] = {}
+            order_index = 0
+            class_priority = self._class_priority(cls_name)
+
             for cls_obj in self.analysis.find_classes(name=cls_name, no_external=True):
                 for method_obj in cls_obj.get_methods():
                     try:
+                        method_name = method_obj.method.get_name()
                         ma = self.analysis.get_method(method_obj.method)
                         if ma is None:
                             continue
+
+                        method_priority = self._method_priority(method_name)
                         for block in ma.get_basic_blocks():
                             for ins in block.get_instructions():
                                 if not ins.get_name().startswith("const-string"):
@@ -759,11 +892,47 @@ class APKAnalyzer:
                                 for op in ins.get_operands():
                                     if isinstance(op, tuple) and len(op) == 3:
                                         _, _, val = op
-                                        if isinstance(val, str) and len(val) >= 4:
-                                            strs.append(val)
+                                        if not isinstance(val, str):
+                                            continue
+
+                                        text = val.strip()
+                                        if not text:
+                                            continue
+
+                                        high_signal = self._matches_high_signal_string(text)
+                                        bootstrap_signal = (
+                                            method_priority > 0 and self._matches_bootstrap_hint(text)
+                                        )
+                                        if self._is_probably_noise_string(text) and not high_signal and not bootstrap_signal:
+                                            continue
+                                        if not high_signal and not bootstrap_signal:
+                                            continue
+
+                                        priority = class_priority + method_priority
+                                        if cls_name == application_class:
+                                            priority += 10
+                                        if high_signal:
+                                            priority += 120
+                                        if bootstrap_signal:
+                                            priority += 35
+
+                                        existing = ranked_strings.get(text)
+                                        candidate = (priority, order_index)
+                                        if existing is None or candidate[0] > existing[0]:
+                                            ranked_strings[text] = candidate
+                                        order_index += 1
                     except Exception:
                         continue
-            if strs:
-                result[cls_name] = strs
+
+            if ranked_strings:
+                ordered_strings = [
+                    text
+                    for text, _ in sorted(
+                        ranked_strings.items(),
+                        key=lambda item: (-item[1][0], item[1][1], len(item[0])),
+                    )
+                ]
+                result[cls_name] = ordered_strings[:self.MAX_STRINGS_PER_CLASS]
+
         return result
 

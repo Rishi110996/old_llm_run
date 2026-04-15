@@ -9,7 +9,7 @@ import hashlib
 import threading
 import queue
 import logging
-from zipfile import ZipFile
+from zipfile import ZipFile, BadZipFile
 
 # Setup logging
 logging.basicConfig(
@@ -58,6 +58,22 @@ def resolve_keytool_command():
 
     return ["keytool"]
 
+
+def resolve_7zip_command():
+    archive_bin = os.environ.get("SEVENZIP_BIN") or shutil.which("7z") or shutil.which("7za") or shutil.which("7zz")
+    if archive_bin:
+        return [archive_bin]
+
+    common_paths = [
+        r"C:\Program Files\7-Zip\7z.exe",
+        r"C:\Program Files (x86)\7-Zip\7z.exe",
+    ]
+    for path in common_paths:
+        if os.path.isfile(path):
+            return [path]
+
+    return None
+
 class ApkDump:
     logs = False
     tempDir = ''
@@ -69,6 +85,7 @@ class ApkDump:
     allFilesList = []
     apktool_cmd = None
     keytool_cmd = None
+    sevenzip_cmd = None
 
     def __init__(self):
         self.tempDir = ''
@@ -81,6 +98,63 @@ class ApkDump:
         self.apkDumpFilesList = []
         self.apktool_cmd = resolve_apktool_command()
         self.keytool_cmd = resolve_keytool_command()
+        self.sevenzip_cmd = resolve_7zip_command()
+
+    def _extract_with_7zip(self, outputDir):
+        if not self.sevenzip_cmd:
+            return False
+
+        cmd = list(self.sevenzip_cmd) + ['x', '-y', f'-o{outputDir}', self.apkFilePath]
+        logging.info("Trying 7-Zip APK extraction fallback")
+        logging.debug(f"Running 7-Zip command: {' '.join(cmd)}")
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            if result.returncode == 0:
+                return True
+            logging.warning("7-Zip extraction failed with code %s", result.returncode)
+            if result.stdout:
+                logging.debug("7-Zip stdout:\n%s", result.stdout)
+            if result.stderr:
+                logging.debug("7-Zip stderr:\n%s", result.stderr)
+        except subprocess.TimeoutExpired:
+            logging.warning("7-Zip extraction timed out")
+        except Exception:
+            logging.exception("7-Zip extraction raised an exception")
+
+        return False
+
+    def _extract_with_zipfile_best_effort(self, outputDir):
+        extracted = 0
+        skipped = 0
+        logging.info("Trying best-effort ZipFile APK extraction fallback")
+        try:
+            with ZipFile(self.apkFilePath, 'r') as zipObj:
+                for info in zipObj.infolist():
+                    out_path = os.path.join(outputDir, info.filename)
+                    try:
+                        if info.is_dir():
+                            os.makedirs(out_path, exist_ok=True)
+                            continue
+
+                        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                        with zipObj.open(info, 'r') as src, open(out_path, 'wb') as dst:
+                            shutil.copyfileobj(src, dst)
+                        extracted += 1
+                    except (NotImplementedError, RuntimeError) as exc:
+                        skipped += 1
+                        logging.warning("Skipping ZIP entry %s: %s", info.filename, exc)
+                    except Exception as exc:
+                        skipped += 1
+                        logging.warning("Failed extracting ZIP entry %s: %s", info.filename, exc)
+        except BadZipFile:
+            logging.exception("APK is not a valid ZIP archive")
+            return False
+        except Exception:
+            logging.exception("Best-effort ZipFile extraction failed")
+            return False
+
+        logging.info("Best-effort ZIP extraction completed: %d extracted, %d skipped", extracted, skipped)
+        return extracted > 0
 
     def fire_apk_tool(self, outputDir):
         apktoolFail = False
@@ -104,8 +178,11 @@ class ApkDump:
 
         if apktoolFail:
             print("\nAPKTool FAILED to decode resources, extracting APK as ZIP...", flush=True)
-            with ZipFile(self.apkFilePath, 'r') as zipObj:
-                zipObj.extractall(outputDir)
+            if self._extract_with_7zip(outputDir):
+                return
+            if self._extract_with_zipfile_best_effort(outputDir):
+                return
+            raise RuntimeError("APK extraction failed after apktool, 7-Zip, and ZipFile fallbacks")
 
 
     def get_cert_details(self):
