@@ -54,6 +54,18 @@ class APKContext:
             },
         }
 
+    def _safe_androidversion_name(self):
+        try:
+            return self.apk.get_androidversion_name()
+        except KeyError:
+            return self.apk.get_attribute_value("manifest", "versionName") or ""
+
+    def _safe_androidversion_code(self):
+        try:
+            return self.apk.get_androidversion_code()
+        except KeyError:
+            return self.apk.get_attribute_value("manifest", "versionCode") or ""
+
     # -------------------------
     # Public getters (cached)
     # -------------------------
@@ -64,8 +76,8 @@ class APKContext:
             "package_name": self.apk.get_package(),
             "main_activity": self.apk.get_main_activity(),
             "app_class": self.apk.get_attribute_value("application", "name"),
-            "internal_version": self.apk.get_androidversion_name(),
-            "displayed_version": self.apk.get_androidversion_code(),
+            "internal_version": self._safe_androidversion_name(),
+            "displayed_version": self._safe_androidversion_code(),
             "min_sdk": self.apk.get_min_sdk_version(),
             "target_sdk": self.apk.get_effective_target_sdk_version(),
         }
