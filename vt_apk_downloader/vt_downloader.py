@@ -19,6 +19,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -1598,7 +1599,12 @@ def download_records(
     }
 
 
-def run_analysis(samples_dir: str, report_dir: str, analysis_script_path: str) -> int:
+def run_analysis(
+    samples_dir: str,
+    report_dir: str,
+    analysis_script_path: str,
+    analysis_extra_args: Optional[List[str]] = None,
+) -> int:
     ensure_dir(report_dir)
 
     cmd = [
@@ -1608,9 +1614,28 @@ def run_analysis(samples_dir: str, report_dir: str, analysis_script_path: str) -
         "--report-dir",
         report_dir,
     ]
+    if analysis_extra_args:
+        cmd.extend(analysis_extra_args)
     print(f"[analysis] Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=os.path.dirname(analysis_script_path))
     return int(result.returncode)
+
+
+def parse_analysis_extra_args(raw_value: Any) -> List[str]:
+    """Normalize analyzer CLI args from YAML into argv tokens."""
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, str):
+        return [arg for arg in shlex.split(raw_value) if arg]
+    if isinstance(raw_value, (list, tuple)):
+        args: List[str] = []
+        for value in raw_value:
+            text = str(value or "").strip()
+            if text:
+                args.append(text)
+        return args
+    text = str(raw_value).strip()
+    return [text] if text else []
 
 
 def cleanup_samples_dir(samples_dir: str, download_root: str) -> None:
@@ -2125,6 +2150,7 @@ def process_batch_from_summary(
     cleanup_completed_samples: bool,
     download_root: str,
     analysis_script_path: Optional[str],
+    analysis_extra_args: Optional[List[str]],
 ) -> bool:
     payload = read_batch_summary(summary_path)
     records = list(payload.get("records") or [])
@@ -2268,7 +2294,12 @@ def process_batch_from_summary(
         if not analysis_script_path:
             raise RuntimeError("analysis_script_path is required when analysis is enabled")
 
-        analysis_rc = run_analysis(samples_dir, report_dir, analysis_script_path)
+        analysis_rc = run_analysis(
+            samples_dir,
+            report_dir,
+            analysis_script_path,
+            analysis_extra_args=analysis_extra_args,
+        )
         payload["analysis_exit_code"] = analysis_rc
         sync_counts = sync_analysis_state_into_db(
             db=db,
@@ -2508,6 +2539,7 @@ def main() -> int:
     download_root = None
     report_root = None
     analysis_script_path = None
+    analysis_extra_args: List[str] = []
     overwrite_existing = bool(download_cfg.get("overwrite_existing"))
     run_id = dt.datetime.now(tz=dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -2536,6 +2568,7 @@ def main() -> int:
             raise SystemExit(
                 f"Configured analysis script does not exist: {analysis_script_path}"
             )
+        analysis_extra_args = parse_analysis_extra_args(analysis_cfg.get("extra_args"))
     elif download_enabled:
         report_root = resolve_path(base_dir, os.path.join(str(ds_cfg["output_dir"]), "batch_reports"))
         ensure_dir(report_root)
@@ -2676,6 +2709,7 @@ def main() -> int:
             cleanup_completed_samples=cleanup_completed_samples,
             download_root=download_root,
             analysis_script_path=analysis_script_path,
+            analysis_extra_args=analysis_extra_args,
         )
 
     def resume_pending_batches() -> None:
@@ -2715,6 +2749,7 @@ def main() -> int:
                 cleanup_completed_samples=cleanup_completed_samples,
                 download_root=download_root,
                 analysis_script_path=analysis_script_path,
+                analysis_extra_args=analysis_extra_args,
             )
             if not ok:
                 raise RuntimeError(

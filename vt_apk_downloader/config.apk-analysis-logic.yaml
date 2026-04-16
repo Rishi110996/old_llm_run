@@ -1,0 +1,101 @@
+# Current-branch batch configuration.
+#
+# This keeps the current branch's samples, reports, manifests, and state DB
+# separate from the older batch layout while reusing the same downloader and
+# multi-runner analyzer flow as main.
+
+api:
+  base_url: "https://www.virustotal.com/api/v3"
+
+  keys:
+    - name: "public_1"
+      key: ""
+      tier: "free"
+    - name: "public_2"
+      key: ""
+      tier: "free"
+    - name: "public_3"
+      key: ""
+      tier: "free"
+    - name: "premium_1"
+      key: ""
+      tier: "premium"
+    - name: "premium_2"
+      key: ""
+      tier: "premium"
+
+  timeout_sec: 60
+  max_attempts_per_request: 12
+  backoff_initial_sec: 2
+  backoff_max_sec: 60
+  max_workers: 1
+
+  rate_limit:
+    per_key_min_interval_sec:
+      premium: 1.0
+      free: 15.0
+    global_min_interval_sec: 0.0
+    jitter_sec: 0.25
+    max_in_flight_requests: 0
+
+  all_keys_exhausted_sleep_hours: 24
+  stop_when_all_keys_exhausted: true
+  stop_when_all_keys_exhausted_min_wait_sec: 300
+
+dataset:
+  output_dir: "/mnt/ext_storage/vt_batch_apk_analysis_logic/output"
+  state_db_path: "/mnt/ext_storage/vt_batch_apk_analysis_logic/state.sqlite"
+
+  downloads:
+    enabled: true
+    download_dir: "/mnt/ext_storage/vt_batch_apk_analysis_logic/apps"
+    overwrite_existing: false
+    selected_families: []
+    preferred_families:
+      - "Ahmyth"
+      - "Spymax"
+      - "Cerberus"
+    excluded_families:
+      - "Bankbot"
+    max_batch_total_bytes: 53687091200
+
+  max_file_size_bytes: 512000
+
+  malicious:
+    total_target: 50000
+    min_malicious_vendors: 10
+    families:
+      - "Ahmyth"
+      - "Spymax"
+      - "Spynote"
+      - "Anubis"
+      - "Triada"
+      - "SMSthief"
+      - "Cerberus"
+      - "SMSreg"
+      - "Bankbot"
+      - "Coper"
+      - "Mamont"
+      - "Anatsa"
+      - "Ermac"
+
+  benign:
+    total_target: 50000
+    max_malicious_vendors: 0
+    max_suspicious_vendors: 0
+
+search:
+  limit: 100
+  common_apk_size_filter: "type:apk and tag:apk and not tag:faulty and size:{max_size_kb}KB-"
+  malicious_template: "{common} and engines:{family} and p:{min_positives}+"
+  benign_template: "{common} and p:0"
+
+analysis:
+  enabled: true
+  script_path: "../llm_V1/modified_trial8_multiple_models.py"
+  report_dir: "/mnt/ext_storage/vt_batch_apk_analysis_logic/reports"
+  extra_args:
+    - "--vt-enrich"
+    - "--no-vt-detection"
+  cleanup_samples_after_analysis: true
+  cleanup_completed_samples_after_analysis: true
