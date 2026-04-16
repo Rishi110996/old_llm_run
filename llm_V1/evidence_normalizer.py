@@ -85,6 +85,11 @@ _PERM_RULES: Dict[str, Tuple[str, float, List[str], str, str]] = {
         "Full read access to all notifications including OTP codes",
         "Notification management apps, smartwatch companion apps, Tasker",
     ),
+    "android.permission.MANAGE_MEDIA_PROJECTION": (
+        "malicious", 0.92, ["data_exfiltration", "c2_networking"],
+        "Privileged screen-capture permission that can enable silent or policy-driven screen recording",
+        "System screen recorder or OEM enterprise control agent",
+    ),
     "android.permission.BIND_VPN_SERVICE": (
         "ambiguous", 0.75, ["c2_networking"],
         "Allows acting as a VPN provider; can intercept and redirect all device traffic",
@@ -195,6 +200,11 @@ _PERM_RULES: Dict[str, Tuple[str, float, List[str], str, str]] = {
         "Full unrestricted file system access (Android 11+)",
         "File manager apps",
     ),
+    "android.permission.MASTER_CLEAR": (
+        "malicious", 0.98, ["privilege_escalation", "persistence"],
+        "System-only wipe permission that can factory-reset the device",
+        "System image or OEM recovery component only",
+    ),
     "android.permission.READ_MEDIA_IMAGES": (
         "ambiguous", 0.35, ["data_exfiltration"],
         "Access to all photos",
@@ -244,6 +254,12 @@ _STRING_RULES: List[_StringRule] = [
         "Hardcoded URL; may be an API or C2 endpoint",
         "Any app that communicates with a backend server",
     ),
+    _StringRule(
+        re.compile(r"\b(?:ws|wss)://[^\s\"']{6,}", re.I),
+        "ambiguous", 0.55, ["c2_networking"],
+        "Bidirectional WebSocket endpoint; often used by RATs for low-latency remote control",
+        "Chat, streaming, or collaboration apps with real-time signaling",
+    ),
     # -- dynamic loading ----------------------------------------------------
     _StringRule(
         re.compile(r"\b(?:DexClassLoader|PathClassLoader|BaseDexClassLoader)\b"),
@@ -289,6 +305,12 @@ _STRING_RULES: List[_StringRule] = [
         "Desktop-ported libraries",
     ),
     _StringRule(
+        re.compile(r"\b(?:MASTER_CLEAR|FACTORY_RESET|wipeData|rebootWipeUserData|RecoverySystem)\b", re.I),
+        "malicious", 0.88, ["privilege_escalation", "persistence"],
+        "Factory-reset or device-wipe API reference",
+        "OEM recovery, MDM, or kiosk-management system app",
+    ),
+    _StringRule(
         re.compile(r"\bchmod\s+[0-7]{3}", re.I),
         "malicious", 0.85, ["privilege_escalation"],
         "chmod command; changing file permissions, often used to make payloads executable",
@@ -319,6 +341,18 @@ _STRING_RULES: List[_StringRule] = [
         "ambiguous", 0.70, ["overlay_fraud"],
         "System window type constant; drawing overlays over other apps",
         "Floating widget apps, chat heads, annotation tools",
+    ),
+    _StringRule(
+        re.compile(r"\b(?:setRingerMode|setInterruptionFilter|INTERRUPTION_FILTER_NONE|setStreamMute|adjustStreamVolume|cancelAll|deleteNotificationChannel)\b"),
+        "ambiguous", 0.62, ["sms_abuse", "credential_theft"],
+        "Notification or audio suppression API reference that can hide OTP alerts during fraud",
+        "Focus-mode, parental-control, or notification-management apps",
+    ),
+    _StringRule(
+        re.compile(r"\b(?:WebSocket|WebSocketClient|PeerConnection(?:Factory)?|ScreenCapturerAndroid|DataChannel)\b", re.I),
+        "ambiguous", 0.45, ["c2_networking", "data_exfiltration"],
+        "Remote-control transport or real-time screen-streaming framework reference",
+        "Video-calling, chat, live-streaming, or remote-support apps",
     ),
     # -- credential theft --------------------------------------------------
     _StringRule(
@@ -604,6 +638,62 @@ _SUSPICIOUS_CERT_PATTERNS: List[re.Pattern] = [
     re.compile(r'"common_name"\s*:\s*"\d{4,}"', re.I),             # all-numeric CN
     re.compile(r'"common_name"\s*:\s*"android\s+debug"', re.I),    # default debug CN
 ]
+
+
+_OTP_CAPTURE_PERMISSIONS = {
+    "android.permission.RECEIVE_SMS",
+    "android.permission.READ_SMS",
+    "android.permission.SEND_SMS",
+    "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE",
+}
+
+_ADMIN_PERMISSIONS = {
+    "android.permission.BIND_DEVICE_ADMIN",
+    "android.permission.MASTER_CLEAR",
+}
+
+_OTP_SUPPRESSION_SOURCE_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"\bAudioManager\b"),
+    re.compile(r"\bNotificationManager\b"),
+    re.compile(r"\bsetRingerMode\b"),
+    re.compile(r"\bsetInterruptionFilter\b"),
+    re.compile(r"\bINTERRUPTION_FILTER_NONE\b"),
+    re.compile(r"\bsetStreamMute\b"),
+    re.compile(r"\badjustStreamVolume\b"),
+    re.compile(r"\bcancelAll\b"),
+    re.compile(r"\bdeleteNotificationChannel\b"),
+)
+
+_WIPE_RESET_SOURCE_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"\bwipeData\b"),
+    re.compile(r"\brebootWipeUserData\b"),
+    re.compile(r"\bRecoverySystem\b"),
+    re.compile(r"\bMASTER_CLEAR\b"),
+    re.compile(r"\bFACTORY_RESET\b"),
+)
+
+_REMOTE_CAPTURE_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"\bMediaProjectionManager\b"),
+    re.compile(r"\bMediaProjection\b"),
+    re.compile(r"\bScreenCapturerAndroid\b"),
+)
+
+_REMOTE_CONTROL_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"\bAccessibilityService\b"),
+    re.compile(r"\bdispatchGesture\b"),
+    re.compile(r"\bAccessibilityNodeInfo\b"),
+    re.compile(r"\bgetRootInActiveWindow\b"),
+    re.compile(r"\bperformAction\b"),
+)
+
+_REMOTE_CHANNEL_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"\b(?:ws|wss)://[^\s\"']{6,}", re.I),
+    re.compile(r"\bWebSocket\b"),
+    re.compile(r"\bWebSocketClient\b"),
+    re.compile(r"\bPeerConnection\b"),
+    re.compile(r"\bPeerConnectionFactory\b"),
+    re.compile(r"\bDataChannel\b"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1125,6 +1215,139 @@ def normalize_certs(certificates: List[Dict[str, Any]]) -> List[EvidenceItem]:
     return items
 
 
+def _collect_component_actions_and_meta(components: Dict[str, Any]) -> Tuple[set[str], set[str]]:
+    actions: set[str] = set()
+    meta_keys: set[str] = set()
+    for comp_type in ("services", "receivers", "activities"):
+        comp_dict = components.get(comp_type, {})
+        if not isinstance(comp_dict, dict):
+            continue
+        for _comp_name, filter_info in comp_dict.items():
+            if not isinstance(filter_info, dict):
+                continue
+            for action in (filter_info.get("action", []) or []):
+                actions.add(str(action))
+            meta = filter_info.get("meta-data", {}) or {}
+            if isinstance(meta, dict):
+                for key in meta.keys():
+                    meta_keys.add(str(key))
+    return actions, meta_keys
+
+
+def _class_source_contains(classes: Dict[str, str], patterns: Tuple[re.Pattern, ...]) -> bool:
+    for source in classes.values():
+        if not source:
+            continue
+        for pattern in patterns:
+            if pattern.search(source):
+                return True
+    return False
+
+
+def _strings_contain(strings_by_class: Dict[str, List[str]], patterns: Tuple[re.Pattern, ...]) -> bool:
+    for string_list in strings_by_class.values():
+        for value in string_list:
+            if not value:
+                continue
+            for pattern in patterns:
+                if pattern.search(value):
+                    return True
+    return False
+
+
+def _class_tags_contain(class_behavior_tags: Dict[str, List[str]], target_tags: Tuple[str, ...]) -> bool:
+    wanted = set(target_tags)
+    for tags in class_behavior_tags.values():
+        if wanted.intersection(tags or []):
+            return True
+    return False
+
+
+def normalize_behavior_chains(apk_facts: APKFacts) -> List[EvidenceItem]:
+    items: List[EvidenceItem] = []
+    permissions = set(apk_facts.permissions or [])
+    component_actions, component_meta = _collect_component_actions_and_meta(apk_facts.components)
+
+    has_notification_capture = (
+        bool(permissions & _OTP_CAPTURE_PERMISSIONS)
+        or "android.service.notification.NotificationListenerService" in component_actions
+        or any("android.service.notification" in key for key in component_meta)
+    )
+    has_fraud_context = _class_tags_contain(
+        apk_facts.class_behavior_tags,
+        ("sms_abuse", "credential_theft", "accessibility_abuse"),
+    )
+    has_suppression_control = (
+        _class_source_contains(apk_facts.classes, _OTP_SUPPRESSION_SOURCE_PATTERNS)
+        or _strings_contain(apk_facts.strings, _OTP_SUPPRESSION_SOURCE_PATTERNS)
+    )
+    if has_notification_capture and has_fraud_context and has_suppression_control:
+        items.append(EvidenceItem(
+            id=make_evidence_id("basic_info", "otp_suppression_chain", "derived:otp_suppression_chain"),
+            kind="basic_info",
+            value="derived:otp_suppression_chain",
+            source_location="derived:otp_suppression_chain",
+            direction="malicious",
+            strength=0.88,
+            behavior_tags=["sms_abuse", "credential_theft", "data_exfiltration"],
+            explanation="Combined OTP-capture and notification/audio suppression chain suggests the app can intercept one-time codes while hiding alerts from the victim",
+            benign_alternatives="Rare combination outside highly privileged notification automation or device-management tooling with explicit user-facing alert controls",
+        ))
+
+    has_admin_capability = (
+        bool(permissions & _ADMIN_PERMISSIONS)
+        or "android.app.action.DEVICE_ADMIN_ENABLED" in component_actions
+        or any("android.app.device_admin" in key for key in component_meta)
+        or _class_source_contains(apk_facts.classes, (re.compile(r"\bDevicePolicyManager\b"),))
+    )
+    has_wipe_reset_path = (
+        _class_source_contains(apk_facts.classes, _WIPE_RESET_SOURCE_PATTERNS)
+        or _strings_contain(apk_facts.strings, _WIPE_RESET_SOURCE_PATTERNS)
+    )
+    if has_admin_capability and has_wipe_reset_path:
+        items.append(EvidenceItem(
+            id=make_evidence_id("basic_info", "wipe_reset_chain", "derived:wipe_reset_chain"),
+            kind="basic_info",
+            value="derived:wipe_reset_chain",
+            source_location="derived:wipe_reset_chain",
+            direction="malicious",
+            strength=0.92,
+            behavior_tags=["privilege_escalation", "persistence"],
+            explanation="Device-admin or recovery control is paired with explicit wipe/factory-reset behavior, indicating a kill-switch or anti-recovery capability",
+            benign_alternatives="OEM recovery utility, enterprise MDM, or locked-down kiosk-management app signed with platform-level privileges",
+        ))
+
+    has_screen_capture = (
+        "android.permission.MANAGE_MEDIA_PROJECTION" in permissions
+        or _class_source_contains(apk_facts.classes, _REMOTE_CAPTURE_PATTERNS)
+        or _strings_contain(apk_facts.strings, _REMOTE_CAPTURE_PATTERNS)
+    )
+    has_remote_control = (
+        "android.accessibilityservice.AccessibilityService" in component_actions
+        or any("android.accessibilityservice" in key for key in component_meta)
+        or _class_source_contains(apk_facts.classes, _REMOTE_CONTROL_PATTERNS)
+        or _strings_contain(apk_facts.strings, _REMOTE_CONTROL_PATTERNS)
+    )
+    has_live_channel = (
+        _class_source_contains(apk_facts.classes, _REMOTE_CHANNEL_PATTERNS)
+        or _strings_contain(apk_facts.strings, _REMOTE_CHANNEL_PATTERNS)
+    )
+    if has_screen_capture and has_remote_control and has_live_channel:
+        items.append(EvidenceItem(
+            id=make_evidence_id("basic_info", "hidden_remote_control_chain", "derived:hidden_remote_control_chain"),
+            kind="basic_info",
+            value="derived:hidden_remote_control_chain",
+            source_location="derived:hidden_remote_control_chain",
+            direction="malicious",
+            strength=0.90,
+            behavior_tags=["accessibility_abuse", "data_exfiltration", "c2_networking"],
+            explanation="Screen-capture APIs, gesture/Accessibility control, and WebSocket or WebRTC-style transport appear together, matching hidden remote-control or fraud-assistance tooling",
+            benign_alternatives="Remote-support or screen-sharing apps, but those should present clear user-facing consent and branding rather than covert fraud context",
+        ))
+
+    return items
+
+
 # ---------------------------------------------------------------------------
 # top-level entrypoint
 # ---------------------------------------------------------------------------
@@ -1143,4 +1366,5 @@ def normalize_all(apk_facts: APKFacts) -> List[EvidenceItem]:
     ))
     items.extend(normalize_native_libs(apk_facts.native_libs))
     items.extend(normalize_certs(apk_facts.certificates))
+    items.extend(normalize_behavior_chains(apk_facts))
     return items

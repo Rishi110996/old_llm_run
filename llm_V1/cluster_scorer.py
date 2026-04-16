@@ -59,6 +59,25 @@ LLM_REVIEW_THRESHOLD     = 0.50   # any family at this score -> review
 LOW_PRIORITY_THRESHOLD   = 0.30   # high-impact families at this score -> review
 
 
+_CURATED_BRIDGE_SOURCES = {
+    "yara:bankbot-static-bridge.yara",
+    "yara:smsthief-static-bridge.yara",
+}
+
+
+def _is_curated_bridge_item(item) -> bool:
+    return item.kind == "yara" and item.source_location in _CURATED_BRIDGE_SOURCES
+
+
+def _has_non_yara_corroboration(cluster: BehaviorCluster) -> bool:
+    for item in cluster.evidence_items:
+        if item.kind == "yara":
+            continue
+        if item.direction != "benign" and item.strength > 0:
+            return True
+    return False
+
+
 def score_cluster(cluster: BehaviorCluster) -> Tuple[float, bool]:
     """
     Returns (cluster_score: float 0..1, needs_llm_review: bool).
@@ -67,10 +86,18 @@ def score_cluster(cluster: BehaviorCluster) -> Tuple[float, bool]:
     if not items:
         return 0.0, False
 
+    has_non_yara_corroboration = _has_non_yara_corroboration(cluster)
+    scored_items = [
+        item for item in items
+        if not (_is_curated_bridge_item(item) and not has_non_yara_corroboration)
+    ]
+    if not scored_items:
+        return 0.0, False
+
     raw = sum(
         i.strength * _DIR_WEIGHT.get(i.direction, 0.40)
-        for i in items
-    ) / len(items)
+        for i in scored_items
+    ) / len(scored_items)
 
     corr_bonus  = 1.0 + 0.15 * cluster.max_chain_length
     benign_disc = cluster.benign_item_count * 0.10

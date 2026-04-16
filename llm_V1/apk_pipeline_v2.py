@@ -242,6 +242,9 @@ _YARA_CATEGORY_MAP = [
     # --- Benign ---
     ("clean",          ["normal_app_behavior"],                          0.70, "benign"),
     # --- Credential theft / banking ---
+    ("bankbot",        ["overlay_fraud", "credential_theft", "c2_networking"], 1.00, "malicious"),
+    ("smsthief",       ["sms_abuse", "credential_theft", "data_exfiltration"], 1.00, "malicious"),
+    ("smsstealer",     ["sms_abuse", "credential_theft", "data_exfiltration"], 1.00, "malicious"),
     ("pws",            ["credential_theft"],                             1.00, "malicious"),
     ("banker",         ["overlay_fraud", "credential_theft", "c2_networking"], 1.00, "malicious"),
     ("banking",        ["overlay_fraud", "credential_theft", "c2_networking"], 1.00, "malicious"),
@@ -291,16 +294,31 @@ def _yara_tags_for_rule(rule_name: str):
     return ["anti_analysis"], 0.85, "malicious"
 
 
+_CURATED_BRIDGE_FAMILIES = {
+    "bankbot-static-bridge.yara": "Bankbot",
+    "smsthief-static-bridge.yara": "SMSthief",
+}
+
+
 def _yara_evidence_items(yara_matches: List[Dict[str, Any]]):
     """Convert YARA hits to EvidenceItems with per-rule family mapping."""
     from evidence_schema import EvidenceItem, make_evidence_id
     items = []
     for hit in yara_matches:
         rule = str(hit.get("detection_rule", hit.get("rule", "unknown")))
+        signature_source = str(hit.get("signature_source") or "")
         tags, strength, direction = _yara_tags_for_rule(rule)
         if direction == "benign":
             explanation = f"Known-clean YARA rule matched: {rule}"
             benign_alts = "Rule is explicitly classified as clean/benign by YARA signature"
+        elif signature_source in _CURATED_BRIDGE_FAMILIES:
+            strength = min(strength, 0.92)
+            bridge_family = _CURATED_BRIDGE_FAMILIES[signature_source]
+            explanation = f"Curated static {bridge_family} bridge rule matched: {rule}"
+            benign_alts = (
+                f"Possible only if an unrelated sample reuses a distinctive {bridge_family}-specific "
+                "string cluster; corroboration is still required downstream"
+            )
         else:
             explanation = f"YARA rule matched: {rule}"
             benign_alts = "None -- a named YARA signature match is authoritative"
@@ -308,7 +326,7 @@ def _yara_evidence_items(yara_matches: List[Dict[str, Any]]):
             id=make_evidence_id("yara", rule, "yara"),
             kind="yara",
             value=rule,
-            source_location="yara",
+            source_location=f"yara:{signature_source}" if signature_source else "yara",
             direction=direction,
             strength=strength,
             behavior_tags=tags,

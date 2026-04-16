@@ -207,6 +207,48 @@ def load_llm_key_configs(config: Dict[str, Any]) -> List[LLMKeyConfig]:
     return []
 
 
+def summarize_llm_key_configuration(config: Dict[str, Any]) -> Dict[str, Any]:
+    configured_entries = config.get("llm_api_keys")
+    active_names: List[str] = []
+    inactive_names: List[str] = []
+
+    if isinstance(configured_entries, list):
+        for idx, entry in enumerate(configured_entries, start=1):
+            if isinstance(entry, dict):
+                name = str(entry.get("name") or f"runner-{idx}").strip() or f"runner-{idx}"
+                api_key = str(entry.get("api_key") or entry.get("value") or "").strip()
+            else:
+                name = f"runner-{idx}"
+                api_key = str(entry or "").strip()
+
+            if api_key:
+                active_names.append(name)
+            else:
+                inactive_names.append(name)
+
+        return {
+            "active_names": active_names,
+            "inactive_names": inactive_names,
+            "uses_legacy_key": False,
+        }
+
+    legacy_key = str(config.get("api_key_zllama") or "").strip()
+    if legacy_key:
+        return {
+            "active_names": [
+                str(config.get("llm_runner_name") or "runner-1").strip() or "runner-1"
+            ],
+            "inactive_names": [],
+            "uses_legacy_key": True,
+        }
+
+    return {
+        "active_names": [],
+        "inactive_names": [],
+        "uses_legacy_key": False,
+    }
+
+
 def create_llm_client(key_config: LLMKeyConfig) -> OpenAI:
     kwargs: Dict[str, Any] = {"api_key": key_config.api_key}
     if key_config.base_url:
@@ -1811,6 +1853,7 @@ if __name__ == "__main__":
     report_dir = args.report_dir or folder_path
     os.makedirs(report_dir, exist_ok=True)
     config = load_runtime_config()
+    key_config_summary = summarize_llm_key_configuration(config)
     key_configs = load_llm_key_configs(config)
     if not key_configs:
         raise SystemExit(
@@ -1822,6 +1865,25 @@ if __name__ == "__main__":
         f"[startup] loaded {len(key_configs)} LLM key(s): "
         f"{', '.join(key.name for key in key_configs)}"
     )
+
+    if not args.worker_mode and len(key_config_summary.get("active_names") or []) == 1:
+        active_name = (key_config_summary.get("active_names") or ["runner-1"])[0]
+        inactive_names = key_config_summary.get("inactive_names") or []
+        inactive_note = ""
+        if inactive_names:
+            inactive_note = (
+                f" Inactive configured runner slot(s): {', '.join(inactive_names)}."
+            )
+        elif key_config_summary.get("uses_legacy_key"):
+            inactive_note = " Using legacy single-key configuration."
+
+        print(
+            "[startup] WARNING: only one active LLM runner key is configured "
+            f"({active_name}). If that key is exhausted or starts failing, the batch "
+            "will not mark samples clean, but there is no second runner to keep the run "
+            "moving; failed samples will need a rerun, and stale in-progress leases may "
+            f"need lease expiry or manual release.{inactive_note}"
+        )
 
     if args.worker_mode or args.llm_key_name or len(key_configs) == 1:
         llm_key_config = pick_llm_key_config(args.llm_key_name, config)

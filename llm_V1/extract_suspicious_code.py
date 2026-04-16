@@ -172,10 +172,17 @@ class APKAnalyzer:
         "Landroid/location/LocationManager;":   (0.55, ["data_exfiltration"]),
         "Landroid/hardware/Camera;":            (0.55, ["data_exfiltration"]),
         "Landroid/media/AudioRecord;":          (0.65, ["data_exfiltration"]),
+        "Landroid/media/AudioManager;":         (0.55, ["sms_abuse", "credential_theft"]),
         # C2 networking
         "Ljava/net/Socket;":                    (0.55, ["c2_networking"]),
         "Ljava/net/URL;":                       (0.40, ["c2_networking"]),
         "Lorg/apache/http/client/HttpClient;":  (0.40, ["c2_networking"]),
+        "Lokhttp3/WebSocket;":                 (0.45, ["c2_networking"]),
+        "Lokhttp3/WebSocketListener;":         (0.40, ["c2_networking"]),
+        "Lorg/java_websocket/client/WebSocketClient;": (0.50, ["c2_networking"]),
+        "Lorg/webrtc/PeerConnection;":         (0.45, ["c2_networking", "data_exfiltration"]),
+        "Lorg/webrtc/PeerConnectionFactory;":  (0.40, ["c2_networking", "data_exfiltration"]),
+        "Lorg/webrtc/ScreenCapturerAndroid;":  (0.60, ["c2_networking", "data_exfiltration"]),
         # reflection / anti-analysis
         "Ljava/lang/reflect/Method;":           (0.50, ["anti_analysis"]),
         "Ljava/lang/Class;":                    (0.40, ["anti_analysis"]),
@@ -189,8 +196,11 @@ class APKAnalyzer:
         "Landroid/app/KeyguardManager;":        (0.55, ["credential_theft"]),
         # device admin / persistence
         "Landroid/app/admin/DevicePolicyManager;": (0.80, ["persistence"]),
+        "Landroid/os/RecoverySystem;":         (0.90, ["privilege_escalation", "persistence"]),
         "Landroid/app/AlarmManager;":           (0.35, ["persistence"]),
         "Landroid/app/job/JobScheduler;":       (0.30, ["persistence"]),
+        "Landroid/app/NotificationManager;":    (0.55, ["sms_abuse", "credential_theft"]),
+        "Landroid/app/NotificationChannel;":    (0.40, ["sms_abuse", "credential_theft"]),
         # app enumeration / overlay timing — banking trojans wait until banking app is foreground
         "Landroid/content/pm/PackageManager;":  (0.55, ["anti_analysis", "overlay_fraud"]),
         "Landroid/app/usage/UsageStatsManager;": (0.75, ["anti_analysis", "overlay_fraud"]),
@@ -230,7 +240,9 @@ class APKAnalyzer:
         (re.compile(r"\b(?:[a-z0-9-]+\.(?:ru|cn|su|top|tk|pw|xyz|kim|click|biz|info))\b", re.I), 0.50, ["c2_networking"]),
         (re.compile(r"https?://[^\s\"']{10,}\.php", re.I), 0.50, ["c2_networking"]),
         (re.compile(r"https?://api\.telegram\.org/bot\d{7,12}:[A-Za-z0-9_-]{35}", re.I), 0.95, ["c2_networking"]),
+        (re.compile(r"\b(?:ws|wss)://[^\s\"']{6,}", re.I), 0.55, ["c2_networking"]),
         (re.compile(r"pastebin\.com/raw/|paste\.ee/r/|hastebin\.com/raw/|rentry\.co/", re.I), 0.75, ["c2_networking"]),
+        (re.compile(r"\b(?:WebSocket|WebSocketClient|PeerConnection(?:Factory)?|ScreenCapturerAndroid|DataChannel)\b", re.I), 0.45, ["c2_networking", "data_exfiltration"]),
         (
             re.compile(
                 r"com\.(?:chase|bankofamerica|wellsfargo|citibank|hsbc|barclays|"
@@ -244,6 +256,8 @@ class APKAnalyzer:
         (re.compile(r"\b(?:DexClassLoader|PathClassLoader|InMemoryDexClassLoader)\b"), 0.85, ["dynamic_code_loading"]),
         (re.compile(r"/bin/sh|/system/bin/sh|cmd\.exe", re.I), 0.85, ["privilege_escalation"]),
         (re.compile(r"\bsu\b"), 0.80, ["privilege_escalation"]),
+        (re.compile(r"\b(?:MASTER_CLEAR|FACTORY_RESET|wipeData|rebootWipeUserData)\b", re.I), 0.85, ["privilege_escalation", "persistence"]),
+        (re.compile(r"\b(?:setRingerMode|setInterruptionFilter|INTERRUPTION_FILTER_NONE|setStreamMute|adjustStreamVolume|cancelAll)\b", re.I), 0.60, ["sms_abuse", "credential_theft"]),
         (re.compile(r"\bTYPE_APPLICATION_OVERLAY\b|\bTYPE_PHONE\b|\bTYPE_SYSTEM_ALERT\b"), 0.65, ["overlay_fraud"]),
         (re.compile(r"\bXposed\b|\bgenymotion\b|\bbluestacks\b", re.I), 0.50, ["anti_analysis"]),
         (re.compile(r"\bchmod\s+[0-7]{3}", re.I), 0.80, ["privilege_escalation"]),
