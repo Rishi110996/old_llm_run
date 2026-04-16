@@ -96,6 +96,7 @@ analysis:
   report_dir: "/mnt/ext_storage/vt_batch_apk_analysis_logic/reports"
   extra_args:
     - "--vt-enrich"
+    - "--use-smba"
     - "--no-vt-detection"
   cleanup_samples_after_analysis: true
   cleanup_completed_samples_after_analysis: true
