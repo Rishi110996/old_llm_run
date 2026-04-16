@@ -6,8 +6,10 @@ converts the results into EvidenceItems for the v2 pipeline.
 Entry point:
     enrich_from_vt(sha256, vt_api_key, logger) -> List[EvidenceItem]
 
-The VT API key can be passed explicitly or is read from
-    vt_apk_downloader/config.yaml  (first premium tier key).
+The VT API key can be passed explicitly or is read from the active downloader
+config. In batch mode, vt_downloader.py provides that path via
+VT_DOWNLOADER_CONFIG_PATH. Otherwise this module falls back to
+vt_apk_downloader/config.yaml.
 """
 from __future__ import annotations
 
@@ -317,22 +319,34 @@ def _ei():
     return EvidenceItem, make_evidence_id
 
 
-def load_vt_api_key_from_config() -> Optional[str]:
-    """Read the first premium VT key from vt_apk_downloader/config.yaml."""
+def resolve_vt_config_path(config_path: Optional[str] = None) -> str:
+    """Resolve the downloader config path used for VT premium key lookup."""
+    if config_path:
+        return os.path.abspath(config_path)
+
+    env_config_path = os.environ.get("VT_DOWNLOADER_CONFIG_PATH", "").strip()
+    if env_config_path:
+        return os.path.abspath(env_config_path)
+
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "vt_apk_downloader",
+        "config.yaml",
+    )
+
+
+def load_vt_api_key_from_config(config_path: Optional[str] = None) -> Optional[str]:
+    """Read the first premium VT key from the resolved downloader config."""
     try:
         import yaml
     except ImportError:
         return None
 
-    config_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "vt_apk_downloader",
-        "config.yaml",
-    )
-    if not os.path.isfile(config_path):
+    resolved_config_path = resolve_vt_config_path(config_path)
+    if not os.path.isfile(resolved_config_path):
         return None
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(resolved_config_path, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
         for key_entry in cfg.get("api", {}).get("keys", []):
             if key_entry.get("tier") == "premium" and key_entry.get("key"):
@@ -682,7 +696,7 @@ def enrich_from_vt(
     Query VT /files/{sha256}/behaviours for network IOCs and download PCAP if available.
     Returns a list of EvidenceItems, or [] on any failure.
 
-    If vt_api_key is None, falls back to the premium key in vt_apk_downloader/config.yaml.
+    If vt_api_key is None, falls back to the premium key in the resolved downloader config.
     pcap_save_dir: directory to save PCAP files. Defaults to a 'pcaps' folder next to this module.
     skip_detection: omit vt_detection and vt_threat_label items. Use when analysing
                     VT-sourced samples where the detection verdict is already known,

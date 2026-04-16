@@ -2436,6 +2436,7 @@ def main() -> int:
     args = ap.parse_args()
 
     config_path = os.path.abspath(args.config)
+    os.environ["VT_DOWNLOADER_CONFIG_PATH"] = config_path
 
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)

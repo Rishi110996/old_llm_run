@@ -424,11 +424,12 @@ def main() -> int:
 
     vt_api_key: Optional[str] = None
     if args.vt_enrich:
-        vt_api_key = vt_enrichment.load_vt_api_key_from_config()
+        vt_config_path = vt_enrichment.resolve_vt_config_path()
+        vt_api_key = vt_enrichment.load_vt_api_key_from_config(vt_config_path)
         if vt_api_key:
-            logger.info("VT premium key loaded from config.yaml")
+            logger.info("VT premium key loaded from %s", vt_config_path)
         else:
-            logger.warning("--vt-enrich: no premium key found in vt_apk_downloader/config.yaml")
+            logger.warning("--vt-enrich: no premium key found in %s", vt_config_path)
 
     target = args.target
     apk_paths: List[str] = []

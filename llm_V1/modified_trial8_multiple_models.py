@@ -1757,7 +1757,7 @@ if __name__ == "__main__":
         default=False,
         help=(
             "Enrich analysis with VirusTotal behaviour data. "
-            "Uses the premium key from vt_apk_downloader/config.yaml automatically."
+            "Uses the premium key from the active VT downloader config automatically."
         ),
     )
     parser.add_argument(
@@ -1798,9 +1798,10 @@ if __name__ == "__main__":
     _NO_VT_DETECTION = bool(args.no_vt_detection)
     if args.vt_enrich:
         import vt_enrichment as _vt_mod
-        _VT_API_KEY = _vt_mod.load_vt_api_key_from_config()
+        _vt_config_path = _vt_mod.resolve_vt_config_path()
+        _VT_API_KEY = _vt_mod.load_vt_api_key_from_config(_vt_config_path)
         if not _VT_API_KEY:
-            print("[startup] --vt-enrich: no premium VT key found in vt_apk_downloader/config.yaml")
+            print(f"[startup] --vt-enrich: no premium VT key found in {_vt_config_path}")
 
     folder_path = args.apk_folder
     if not os.path.isdir(folder_path):
