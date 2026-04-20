@@ -236,13 +236,13 @@ def _items_from_mitre(mitre: Dict[str, Any], logger: logging.Logger) -> "List":
 
 
 def enrich_from_smba(
-    sha256: str,
+    sample_id: str,
     env_path: str,
     logger: logging.Logger,
     jsessionid_override: str = "",
 ) -> "List":
     """
-    Query Zscaler SMBA sandbox for the given SHA-256 hash.
+    Query Zscaler SMBA sandbox for the given sample ID (MD5 hash).
     Returns a list of EvidenceItems, or [] if unavailable/not found.
 
     env_path  path to the .env file containing ZSCALER_BASE_URL and ZSCALER_JSESSIONID.
@@ -279,8 +279,8 @@ def enrich_from_smba(
             del os.environ["ZSCALER_JSESSIONID"]
 
     try:
-        if not client.sample_exists(sha256):
-            logger.info("[smba] sample %s not found in SMBA", sha256[:16])
+        if not client.sample_exists(sample_id):
+            logger.info("[smba] sample %s not found in SMBA", sample_id[:16])
             return []
     except Exception as exc:
         logger.warning("[smba] sample_exists check failed: %s", exc)
@@ -288,8 +288,9 @@ def enrich_from_smba(
 
     logger.info("[smba] sample found -- pulling traffic + behavior + MITRE")
 
+
     try:
-        report = client.get_full_report(sha256, include_artifacts=False)
+        report = client.get_full_report(sample_id, include_artifacts=False)
     except Exception as exc:
         logger.warning("[smba] report fetch failed: %s", exc)
         return []
@@ -302,13 +303,13 @@ def enrich_from_smba(
 
     # Check PCAP availability and log it
     try:
-        artifacts = client.get_artifacts_summary(sha256)
+        artifacts = client.get_artifacts_summary(sample_id)
         pcap_info = artifacts.get("pcap", {})
         if pcap_info.get("available"):
             pcap_meta = pcap_info.get("metadata") or {}
             logger.info(
                 "[smba] PCAP available for %s: size=%s  filename=%s",
-                sha256[:16],
+                sample_id[:16],
                 pcap_meta.get("size", "unknown"),
                 pcap_meta.get("filename", "unknown"),
             )

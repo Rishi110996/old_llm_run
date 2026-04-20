@@ -13,3 +13,48 @@ vt_apk_downloader/state.sqlite
 # Keep secrets out of git
 vt_apk_downloader/config.yaml
 llm_V1/config.json
+
+# Ignore more binaries and archives
+*.log
+*.jsonl
+*.sqlite
+*.db
+*.bin
+*.apk
+*.zip
+*.tar
+*.gz
+*.7z
+*.rar
+*.exe
+*.dll
+*.so
+*.o
+*.a
+*.dylib
+*.class
+*.jar
+*.dex
+*.img
+*.iso
+*.msi
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Ignore test and sample folders
+test_smba_presence/
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore IDE/project files
+.vscode/
+.idea/
+*.iml
+
+# Ignore YAML config secrets
+*.yaml
+*.yml

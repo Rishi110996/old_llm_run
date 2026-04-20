@@ -237,12 +237,16 @@ def analyse_apk(
 ) -> Dict[str, Any]:
 
     apk_name = os.path.basename(apk_path)
-    sha256 = hashlib.sha256(open(apk_path, "rb").read()).hexdigest()
+    with open(apk_path, "rb") as f:
+        file_data = f.read()
+    sha256 = hashlib.sha256(file_data).hexdigest()
+    md5 = hashlib.md5(file_data).hexdigest() if use_smba else None
 
     print()
     print("=" * 80)
     print(f"  APK    : {apk_name}")
     print(f"  SHA256 : {sha256}")
+    print(f"  MD5    : {md5}")
     print(f"  Size   : {os.path.getsize(apk_path) // 1024} KB")
     print("=" * 80)
 
@@ -278,8 +282,8 @@ def analyse_apk(
     # Optional enrichment
     if use_smba:
         smba_env = os.path.join(_SCRIPT_DIR, "smba_data_pull", ".env")
-        logger.info("SMBA enrichment (sha256=%s...)  ", sha256[:16])
-        smba_items = smba_enrichment.enrich_from_smba(sha256, smba_env, logger)
+        logger.info("SMBA enrichment (md5=%s...)  ", md5[:16])
+        smba_items = smba_enrichment.enrich_from_smba(md5, smba_env, logger)
         evidence_items.extend(smba_items)
         logger.info("SMBA: %d item(s) added", len(smba_items))
 

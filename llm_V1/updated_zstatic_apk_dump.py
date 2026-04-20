@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import threading
 import queue
+import tempfile
 import logging
 from zipfile import ZipFile, BadZipFile
 
@@ -276,7 +277,7 @@ class ApkDump:
                 outfile.write(str(md5 + '\n').encode(encoding="UTF-8"))
             for fname in self.allFilesList:
                 fpath = self.tempDir + os.sep + fname
-                fileInfo = 'filename:%s filetype: %s\n' % (fname.replace('\\', '/'), magic.from_file(fpath))
+                fileInfo = 'filename:%s filetype: unknown\n' % (fname.replace('\\', '/'))
                 if self.logs:
                     logging.info(fileInfo.strip())
                 outfile.write(fileInfo.encode("UTF-8"))
@@ -291,13 +292,11 @@ class ApkDump:
         apk_md5 = hashlib.md5(data).hexdigest()
         self.apkDumpPath = os.path.join(bin_dir,apk_md5)+ '_apk_dump.bin'
         if self.forceDump or not os.path.exists(self.apkDumpPath):
-            self.tempDir = self.apkFilePath + '_temp'
-            if os.path.exists(self.tempDir):
+            self.tempDir = tempfile.mkdtemp(prefix='apk_extract_')
+            try:
+                self.create_apk_dump_file()
+            finally:
                 shutil.rmtree(self.tempDir)
-            os.makedirs(self.tempDir)
-
-            self.create_apk_dump_file()
-            shutil.rmtree(self.tempDir)
 
 def getAllFilesList(dir):
     logging.debug(f"Gathering all files from: {dir}")

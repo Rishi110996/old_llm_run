@@ -652,7 +652,12 @@ def run_tools(apk_path, logger):
 def call_llm(messages, model, logger, llm_client: OpenAI, max_retries=3):
     """
     Call LLM through the ZLlama/OpenAI-compatible client.
+    Tracks call count and total tokens used in global context.
     """
+    global LLM_CALL_STATS
+    if 'LLM_CALL_STATS' not in globals():
+        LLM_CALL_STATS = {'call_count': 0, 'total_tokens': 0}
+
     runtime_config = load_runtime_config()
     default_metadata = get_llm_request_metadata(runtime_config)
     disabled_guardrail_metadata = get_disabled_guardrail_metadata(runtime_config)
@@ -691,6 +696,24 @@ def call_llm(messages, model, logger, llm_client: OpenAI, max_retries=3):
                 response = llm_client.chat.completions.create(**fallback_kwargs)
 
             content = response.choices[0].message.content
+            # --- Token counting ---
+            usage = getattr(response, 'usage', None)
+            if usage:
+                prompt_tokens = getattr(usage, 'prompt_tokens', 0)
+                completion_tokens = getattr(usage, 'completion_tokens', 0)
+                total_tokens = getattr(usage, 'total_tokens', 0)
+            else:
+                # Try dict fallback (for OpenAI-like clients)
+                prompt_tokens = getattr(response, 'prompt_tokens', 0)
+                completion_tokens = getattr(response, 'completion_tokens', 0)
+                total_tokens = getattr(response, 'total_tokens', 0)
+            # Fallback: try to get from response.usage dict
+            if hasattr(response, 'usage') and isinstance(response.usage, dict):
+                total_tokens = response.usage.get('total_tokens', total_tokens)
+            # Update global stats
+            LLM_CALL_STATS['call_count'] += 1
+            LLM_CALL_STATS['total_tokens'] += total_tokens if total_tokens else 0
+
             if content is None or not str(content).strip():
                 logger.error(f"LLM returned empty content on attempt {attempt}")
                 continue
@@ -1394,15 +1417,20 @@ def analyze_sample_with_state(
     )
     lease_heartbeat.start()
 
+
+    import time
+    start_time = time.time()
     try:
         readable, parse_error = probe_apk_readability(apk_path)
         if not readable:
             logger.error(f"APK parse failed before analysis: {parse_error}")
+            elapsed = time.time() - start_time
             payload = {
                 "apk_file": os.path.basename(apk_path),
                 "sha256": sha256,
                 "status": "corrupt",
                 "error": parse_error,
+                "analysis_time_sec": round(elapsed, 2),
             }
             write_json(verdict_path, payload)
             master_log.write(f"{apk_name}: {json.dumps(payload, ensure_ascii=False)}\n")
@@ -1414,16 +1442,23 @@ def analyze_sample_with_state(
         if not isinstance(verdict, dict) or not verdict:
             raise RuntimeError("Analyzer returned no verdict")
 
+        elapsed = time.time() - start_time
+        # Extract LLM stats if present in verdict
+        llm_call_count = verdict.get('llm_call_count', 0)
+        llm_total_tokens = verdict.get('llm_total_tokens', 0)
         payload = {
             "apk_file": os.path.basename(apk_path),
             "sha256": sha256,
             "status": "done",
             "verdict": verdict,
+            "analysis_time_sec": round(elapsed, 2),
+            "llm_call_count": llm_call_count,
+            "llm_total_tokens": llm_total_tokens,
         }
         write_json(verdict_path, payload)
 
         logger.info("\n[FINAL VERDICT]\n%s", json.dumps(verdict, indent=2, ensure_ascii=False))
-        master_log.write(f"{apk_name}: {json.dumps(verdict, ensure_ascii=False)}\n")
+        master_log.write(f"{apk_name}: {json.dumps(payload, ensure_ascii=False)}\n")
         master_log.flush()
 
         state_db.finish(sha256=sha256, status="done", last_error=None, runner_id=runner_id)
@@ -1431,12 +1466,14 @@ def analyze_sample_with_state(
 
     except Exception as e:
         logger.exception(f"Analysis failed for {apk_name}: {e}")
+        elapsed = time.time() - start_time
         if is_terminal_corrupt_error(e):
             payload = {
                 "apk_file": os.path.basename(apk_path),
                 "sha256": sha256,
                 "status": "corrupt",
                 "error": str(e),
+                "analysis_time_sec": round(elapsed, 2),
             }
             write_json(verdict_path, payload)
             master_log.write(f"{apk_name}: {json.dumps(payload, ensure_ascii=False)}\n")
@@ -1450,6 +1487,7 @@ def analyze_sample_with_state(
                 "sha256": sha256,
                 "status": "failed",
                 "error": str(e),
+                "analysis_time_sec": round(elapsed, 2),
             }
             write_json(verdict_path, payload)
             state_db.finish(sha256=sha256, status="failed", last_error=str(e), runner_id=runner_id)

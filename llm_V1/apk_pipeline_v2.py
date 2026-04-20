@@ -467,6 +467,10 @@ def run(
     """
     from modified_trial8_multiple_models import call_llm, normalize_final_verdict, safe_log
 
+    # --- Reset LLM call stats for this APK ---
+    global LLM_CALL_STATS
+    LLM_CALL_STATS = {'call_count': 0, 'total_tokens': 0}
+
     # -- Stage 0: extraction ------------------------------------------------
     logger.info("[pipeline_v2] Stage 0: extraction")
     apk_facts = _extract_facts(apk_path, logger)
@@ -501,22 +505,26 @@ def run(
 
     logger.info("[pipeline_v2] %d evidence items after normalization", len(evidence_items))
 
-    # -- Stage 1b/c (optional): sandbox enrichment ------------------------
-    # NOTE: sha256 is only computed when at least one enrichment source is active.
+        # (duplicate import removed)
+    # NOTE: hashes are only computed when at least one enrichment source is active.
     # VT runs only when vt_api_key was explicitly provided by the caller
     # (set via --vt-enrich flag in the CLI); it does NOT auto-load from config here.
-    _needs_sha256 = use_smba or vt_api_key is not None
-    if _needs_sha256:
+    _needs_hash = use_smba or vt_api_key is not None
+    if _needs_hash:
         import hashlib
-        _sha256 = hashlib.sha256(open(apk_path, "rb").read()).hexdigest()
+        with open(apk_path, "rb") as f:
+            file_data = f.read()
+        _sha256 = hashlib.sha256(file_data).hexdigest() if vt_api_key is not None else None
+        _md5 = hashlib.md5(file_data).hexdigest() if use_smba else None
     else:
         _sha256 = None
+        _md5 = None
 
-    if use_smba and _sha256:
+    if use_smba and _md5:
         smba_env = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "smba_data_pull", ".env")
-        logger.info("[pipeline_v2] Stage 1b: SMBA enrichment (sha256=%s...)", _sha256[:16])
-        smba_items = smba_enrichment.enrich_from_smba(_sha256, smba_env, logger, jsessionid_override=smba_jsessionid)
+        logger.info("[pipeline_v2] Stage 1b: SMBA enrichment (md5=%s...)", _md5[:16])
+        smba_items = smba_enrichment.enrich_from_smba(_md5, smba_env, logger, jsessionid_override=smba_jsessionid)
         evidence_items.extend(smba_items)
         logger.info("[pipeline_v2] SMBA: %d item(s) added", len(smba_items))
 
@@ -568,6 +576,11 @@ def run(
     normalized = normalize_final_verdict(raw_verdict, logger)
     if normalized is None:
         raise RuntimeError("Final LLM verdict unavailable or invalid after retries")
+
+    # --- Attach per-APK LLM usage stats ---
+    if 'LLM_CALL_STATS' in globals():
+        normalized['llm_call_count'] = LLM_CALL_STATS.get('call_count', 0)
+        normalized['llm_total_tokens'] = LLM_CALL_STATS.get('total_tokens', 0)
 
     logger.info("[pipeline_v2] DONE -- %s  risk=%d",
                 normalized.get("Malicious") and "MALICIOUS" or
