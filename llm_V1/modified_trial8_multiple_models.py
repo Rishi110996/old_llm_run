@@ -637,6 +637,110 @@ def setup_logger(log_file_path, apk_name):
 def safe_log(logger, msg):
     logger.info(msg.encode("utf-8", errors="replace").decode("utf-8"))
 
+LLM_CALL_STATS = {
+    "call_count": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0,
+    "estimated_tokens": 0,
+    "token_count_estimated": False,
+}
+
+
+def reset_llm_call_stats() -> None:
+    LLM_CALL_STATS.clear()
+    LLM_CALL_STATS.update({
+        "call_count": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "estimated_tokens": 0,
+        "token_count_estimated": False,
+    })
+
+
+def get_llm_call_stats() -> Dict[str, Any]:
+    return dict(LLM_CALL_STATS)
+
+
+def _usage_to_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if value is None:
+        return {}
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            pass
+    if hasattr(value, "dict"):
+        try:
+            dumped = value.dict()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            pass
+    return {}
+
+
+def _usage_int(source: Any, key: str) -> int:
+    if source is None:
+        return 0
+    if isinstance(source, dict):
+        value = source.get(key, 0)
+    else:
+        value = getattr(source, key, 0)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_usage_counts(response: Any) -> Dict[str, int]:
+    usage = getattr(response, "usage", None)
+    usage_dict = _usage_to_dict(usage)
+
+    if not usage_dict and hasattr(response, "model_dump"):
+        try:
+            response_dict = response.model_dump()
+            usage_dict = _usage_to_dict(response_dict.get("usage")) if isinstance(response_dict, dict) else {}
+        except Exception:
+            usage_dict = {}
+
+    prompt_tokens = _usage_int(usage_dict or usage, "prompt_tokens")
+    completion_tokens = _usage_int(usage_dict or usage, "completion_tokens")
+    total_tokens = _usage_int(usage_dict or usage, "total_tokens")
+
+    if not total_tokens:
+        prompt_tokens = prompt_tokens or _usage_int(response, "prompt_tokens")
+        completion_tokens = completion_tokens or _usage_int(response, "completion_tokens")
+        total_tokens = _usage_int(response, "total_tokens")
+
+    if not total_tokens and (prompt_tokens or completion_tokens):
+        total_tokens = prompt_tokens + completion_tokens
+
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _estimate_tokens_from_messages(messages: List[Dict[str, Any]], content: str) -> int:
+    text_parts: List[str] = []
+    for message in messages or []:
+        if isinstance(message, dict):
+            text_parts.append(str(message.get("content") or ""))
+        else:
+            text_parts.append(str(message))
+    text_parts.append(str(content or ""))
+    # Conservative fallback when the gateway omits usage. This is explicitly
+    # marked as estimated in output payloads.
+    return max(1, int(sum(len(part) for part in text_parts) / 4))
+
+
 # -------------------- TOOLS --------------------
 def run_tools(apk_path, logger):
     results = {}
@@ -654,10 +758,6 @@ def call_llm(messages, model, logger, llm_client: OpenAI, max_retries=3):
     Call LLM through the ZLlama/OpenAI-compatible client.
     Tracks call count and total tokens used in global context.
     """
-    global LLM_CALL_STATS
-    if 'LLM_CALL_STATS' not in globals():
-        LLM_CALL_STATS = {'call_count': 0, 'total_tokens': 0}
-
     runtime_config = load_runtime_config()
     default_metadata = get_llm_request_metadata(runtime_config)
     disabled_guardrail_metadata = get_disabled_guardrail_metadata(runtime_config)
@@ -696,23 +796,26 @@ def call_llm(messages, model, logger, llm_client: OpenAI, max_retries=3):
                 response = llm_client.chat.completions.create(**fallback_kwargs)
 
             content = response.choices[0].message.content
-            # --- Token counting ---
-            usage = getattr(response, 'usage', None)
-            if usage:
-                prompt_tokens = getattr(usage, 'prompt_tokens', 0)
-                completion_tokens = getattr(usage, 'completion_tokens', 0)
-                total_tokens = getattr(usage, 'total_tokens', 0)
-            else:
-                # Try dict fallback (for OpenAI-like clients)
-                prompt_tokens = getattr(response, 'prompt_tokens', 0)
-                completion_tokens = getattr(response, 'completion_tokens', 0)
-                total_tokens = getattr(response, 'total_tokens', 0)
-            # Fallback: try to get from response.usage dict
-            if hasattr(response, 'usage') and isinstance(response.usage, dict):
-                total_tokens = response.usage.get('total_tokens', total_tokens)
-            # Update global stats
-            LLM_CALL_STATS['call_count'] += 1
-            LLM_CALL_STATS['total_tokens'] += total_tokens if total_tokens else 0
+
+            usage_counts = _extract_usage_counts(response)
+            total_tokens = usage_counts["total_tokens"]
+            estimated = False
+            if not total_tokens:
+                total_tokens = _estimate_tokens_from_messages(messages, str(content or ""))
+                estimated = True
+
+            LLM_CALL_STATS["call_count"] += 1
+            LLM_CALL_STATS["prompt_tokens"] += usage_counts["prompt_tokens"]
+            LLM_CALL_STATS["completion_tokens"] += usage_counts["completion_tokens"]
+            LLM_CALL_STATS["total_tokens"] += total_tokens
+            if estimated:
+                LLM_CALL_STATS["estimated_tokens"] += total_tokens
+                LLM_CALL_STATS["token_count_estimated"] = True
+                logger.warning(
+                    "LLM response did not include usage metadata; estimated %d tokens for model %s.",
+                    total_tokens,
+                    model,
+                )
 
             if content is None or not str(content).strip():
                 logger.error(f"LLM returned empty content on attempt {attempt}")
@@ -1444,8 +1547,12 @@ def analyze_sample_with_state(
 
         elapsed = time.time() - start_time
         # Extract LLM stats if present in verdict
-        llm_call_count = verdict.get('llm_call_count', 0)
-        llm_total_tokens = verdict.get('llm_total_tokens', 0)
+        llm_call_count = verdict.get("llm_call_count", 0)
+        llm_prompt_tokens = verdict.get("llm_prompt_tokens", 0)
+        llm_completion_tokens = verdict.get("llm_completion_tokens", 0)
+        llm_total_tokens = verdict.get("llm_total_tokens", 0)
+        llm_estimated_tokens = verdict.get("llm_estimated_tokens", 0)
+        llm_token_count_estimated = bool(verdict.get("llm_token_count_estimated", False))
         payload = {
             "apk_file": os.path.basename(apk_path),
             "sha256": sha256,
@@ -1453,7 +1560,11 @@ def analyze_sample_with_state(
             "verdict": verdict,
             "analysis_time_sec": round(elapsed, 2),
             "llm_call_count": llm_call_count,
+            "llm_prompt_tokens": llm_prompt_tokens,
+            "llm_completion_tokens": llm_completion_tokens,
             "llm_total_tokens": llm_total_tokens,
+            "llm_estimated_tokens": llm_estimated_tokens,
+            "llm_token_count_estimated": llm_token_count_estimated,
         }
         write_json(verdict_path, payload)
 

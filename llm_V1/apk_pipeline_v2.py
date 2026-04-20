@@ -465,11 +465,16 @@ def run(
       no_vt_detection  -- skip vt_detection / vt_threat_label items; keeps traffic/PCAP.
                          Use when batch-analysing VT-sourced samples where detection is known.
     """
-    from modified_trial8_multiple_models import call_llm, normalize_final_verdict, safe_log
+    from modified_trial8_multiple_models import (
+        call_llm,
+        get_llm_call_stats,
+        normalize_final_verdict,
+        reset_llm_call_stats,
+        safe_log,
+    )
 
     # --- Reset LLM call stats for this APK ---
-    global LLM_CALL_STATS
-    LLM_CALL_STATS = {'call_count': 0, 'total_tokens': 0}
+    reset_llm_call_stats()
 
     # -- Stage 0: extraction ------------------------------------------------
     logger.info("[pipeline_v2] Stage 0: extraction")
@@ -578,9 +583,13 @@ def run(
         raise RuntimeError("Final LLM verdict unavailable or invalid after retries")
 
     # --- Attach per-APK LLM usage stats ---
-    if 'LLM_CALL_STATS' in globals():
-        normalized['llm_call_count'] = LLM_CALL_STATS.get('call_count', 0)
-        normalized['llm_total_tokens'] = LLM_CALL_STATS.get('total_tokens', 0)
+    llm_stats = get_llm_call_stats()
+    normalized["llm_call_count"] = llm_stats.get("call_count", 0)
+    normalized["llm_prompt_tokens"] = llm_stats.get("prompt_tokens", 0)
+    normalized["llm_completion_tokens"] = llm_stats.get("completion_tokens", 0)
+    normalized["llm_total_tokens"] = llm_stats.get("total_tokens", 0)
+    normalized["llm_estimated_tokens"] = llm_stats.get("estimated_tokens", 0)
+    normalized["llm_token_count_estimated"] = bool(llm_stats.get("token_count_estimated", False))
 
     logger.info("[pipeline_v2] DONE -- %s  risk=%d",
                 normalized.get("Malicious") and "MALICIOUS" or
