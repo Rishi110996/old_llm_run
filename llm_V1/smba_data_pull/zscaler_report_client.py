@@ -134,9 +134,14 @@ class ZscalerReportClient:
         self._thread_local.session = self.session
 
     def sample_exists(self, sample_id: str) -> bool:
-        path = f"/ba/api/v1/reports/{sample_id}/{REPORT_ENDPOINTS['summary']}"
-        response = self._request("GET", path, expected_status=(200, 404))
-        return response.status_code == 200
+        try:
+            self.get_summary(sample_id)
+            return True
+        except ReportNotFoundError:
+            return False
+        except Exception:
+            # Transient/component-level failures do not prove the sample is absent.
+            return True
 
     def get_all_components(self, sample_id: str) -> dict[str, Any]:
         return self.get_full_report(sample_id, include_artifacts=True)
@@ -377,11 +382,16 @@ class ZscalerReportClient:
     ) -> dict[str, Any] | list[Any]:
         response = self._request("GET", path, expected_status=(200, 404))
         if response.status_code == 404:
+            body = response.text[:500]
             if sample_id is not None:
-                raise ReportNotFoundError(
-                    f"Sample {sample_id} was not found while fetching {component or path}"
+                if "invalid report id" in body.lower():
+                    raise ReportNotFoundError(
+                        f"Sample {sample_id} not found in SMBA: {body}"
+                    )
+                raise ZscalerClientError(
+                    f"Component {component or path} unavailable for sample {sample_id}: {body}"
                 )
-            raise ReportNotFoundError(f"Resource not found: {path}")
+            raise ZscalerClientError(f"Resource unavailable: {path}: {body}")
         try:
             return response.json()
         except ValueError as exc:
@@ -554,13 +564,27 @@ class ZscalerReportClient:
 
     def _fetch_named_calls(self, call_map: dict[str, Any]) -> dict[str, Any]:
         if len(call_map) <= 1 or self.config.max_workers == 1:
-            return {name: func() for name, func in call_map.items()}
+            results: dict[str, Any] = {}
+            for name, func in call_map.items():
+                try:
+                    results[name] = func()
+                except ReportNotFoundError:
+                    raise
+                except Exception:
+                    results[name] = None
+            return results
 
         results: dict[str, Any] = {}
         with ThreadPoolExecutor(max_workers=min(self.config.max_workers, len(call_map))) as executor:
             future_map = {executor.submit(func): name for name, func in call_map.items()}
             for future in as_completed(future_map):
-                results[future_map[future]] = future.result()
+                name = future_map[future]
+                try:
+                    results[name] = future.result()
+                except ReportNotFoundError:
+                    raise
+                except Exception:
+                    results[name] = None
         return results
 
     def _request(

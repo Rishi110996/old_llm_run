@@ -39,9 +39,14 @@ class AsyncZscalerReportClient:
             self._session = None
 
     async def sample_exists(self, sample_id: str) -> bool:
-        path = f"/ba/api/v1/reports/{sample_id}/{REPORT_ENDPOINTS['summary']}"
-        response = await self._request("GET", path, expected_status=(200, 404))
-        return response.status == 200
+        try:
+            await self.get_summary(sample_id)
+            return True
+        except ReportNotFoundError:
+            return False
+        except Exception:
+            # Transient/component-level failures do not prove the sample is absent.
+            return True
 
     async def get_full_report(
         self,
@@ -58,7 +63,6 @@ class AsyncZscalerReportClient:
                 "behavior": self.get_behavior(sample_id),
                 "permissions": self.get_permissions(sample_id),
                 "mitre": self.get_mitre(sample_id),
-                "screenshots": self.get_screenshots(sample_id),
             }
         )
 
@@ -256,12 +260,17 @@ class AsyncZscalerReportClient:
     ) -> dict[str, Any] | list[Any]:
         response = await self._request("GET", path, expected_status=(200, 404))
         if response.status == 404:
+            body = await response.text()
             response.release()
             if sample_id is not None:
-                raise ReportNotFoundError(
-                    f"Sample {sample_id} was not found while fetching {component or path}"
+                if "invalid report id" in body.lower():
+                    raise ReportNotFoundError(
+                        f"Sample {sample_id} not found in SMBA: {body[:500]}"
+                    )
+                raise ZscalerClientError(
+                    f"Component {component or path} unavailable for sample {sample_id}: {body[:500]}"
                 )
-            raise ReportNotFoundError(f"Resource not found: {path}")
+            raise ZscalerClientError(f"Resource unavailable: {path}: {body[:500]}")
 
         try:
             data = await response.json()
@@ -374,8 +383,16 @@ class AsyncZscalerReportClient:
 
     async def _gather_named_calls(self, call_map: dict[str, Any]) -> dict[str, Any]:
         keys = list(call_map.keys())
-        values = await asyncio.gather(*call_map.values())
-        return dict(zip(keys, values))
+        values = await asyncio.gather(*call_map.values(), return_exceptions=True)
+        results: dict[str, Any] = {}
+        for key, value in zip(keys, values):
+            if isinstance(value, ReportNotFoundError):
+                raise value
+            if isinstance(value, Exception):
+                results[key] = None
+            else:
+                results[key] = value
+        return results
 
     def _build_download_metadata(
         self,

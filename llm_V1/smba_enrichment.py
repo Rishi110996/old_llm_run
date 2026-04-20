@@ -8,7 +8,7 @@ Requirements:
     - The sample must already exist in BA (submitted for sandbox analysis)
 
 Entry point:
-    enrich_from_smba(sha256, env_path, logger) -> List[EvidenceItem]
+    enrich_from_smba(md5, env_path, logger) -> List[EvidenceItem]
     Returns an empty list (silently) if SMBA is unavailable or the sample is not found.
 """
 from __future__ import annotations
@@ -279,21 +279,15 @@ def enrich_from_smba(
             del os.environ["ZSCALER_JSESSIONID"]
 
     try:
-        if not client.sample_exists(sample_id):
-            logger.info("[smba] sample %s not found in SMBA", sample_id[:16])
-            return []
+        report = client.get_full_report(sample_id, include_artifacts=False)
     except Exception as exc:
-        logger.warning("[smba] sample_exists check failed: %s", exc)
+        if "invalid report id" in str(exc).lower():
+            logger.info("[smba] sample %s not found in SMBA: %s", sample_id[:16], exc)
+            return []
+        logger.warning("[smba] report fetch failed: %s", exc)
         return []
 
     logger.info("[smba] sample found -- pulling traffic + behavior + MITRE")
-
-
-    try:
-        report = client.get_full_report(sample_id, include_artifacts=False)
-    except Exception as exc:
-        logger.warning("[smba] report fetch failed: %s", exc)
-        return []
 
     items: "List" = []
 
@@ -301,26 +295,16 @@ def enrich_from_smba(
     behavior = report.get("behavior", {})
     mitre    = report.get("mitre", {})
 
-    # Check PCAP availability and log it
-    try:
-        artifacts = client.get_artifacts_summary(sample_id)
-        pcap_info = artifacts.get("pcap", {})
-        if pcap_info.get("available"):
-            pcap_meta = pcap_info.get("metadata") or {}
-            logger.info(
-                "[smba] PCAP available for %s: size=%s  filename=%s",
-                sample_id[:16],
-                pcap_meta.get("size", "unknown"),
-                pcap_meta.get("filename", "unknown"),
-            )
-        else:
-            logger.debug("[smba] no PCAP artifact for this sample")
-    except Exception:
-        pass
-
-    items.extend(_items_from_traffic(traffic, logger))
-    items.extend(_items_from_behavior(behavior, logger))
-    items.extend(_items_from_mitre(mitre, logger))
+    for source_name, builder, payload in (
+        ("traffic", _items_from_traffic, traffic),
+        ("behavior", _items_from_behavior, behavior),
+        ("mitre", _items_from_mitre, mitre),
+    ):
+        try:
+            if payload:
+                items.extend(builder(payload, logger))
+        except Exception as exc:
+            logger.warning("[smba] could not convert %s section into evidence: %s", source_name, exc)
 
     logger.info("[smba] total enrichment: %d evidence items", len(items))
     return items
