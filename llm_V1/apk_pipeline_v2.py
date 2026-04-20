@@ -584,10 +584,15 @@ def run(
 
     # --- Attach per-APK LLM usage stats ---
     llm_stats = get_llm_call_stats()
+    llm_input_tokens = llm_stats.get("prompt_tokens", 0)
+    llm_output_tokens = llm_stats.get("completion_tokens", 0)
     normalized["llm_call_count"] = llm_stats.get("call_count", 0)
-    normalized["llm_prompt_tokens"] = llm_stats.get("prompt_tokens", 0)
-    normalized["llm_completion_tokens"] = llm_stats.get("completion_tokens", 0)
+    normalized["llm_input_tokens"] = llm_input_tokens
+    normalized["llm_output_tokens"] = llm_output_tokens
     normalized["llm_total_tokens"] = llm_stats.get("total_tokens", 0)
+    # Backward-compatible aliases for older dashboards/scripts.
+    normalized["llm_prompt_tokens"] = llm_input_tokens
+    normalized["llm_completion_tokens"] = llm_output_tokens
     normalized["llm_estimated_tokens"] = llm_stats.get("estimated_tokens", 0)
     normalized["llm_token_count_estimated"] = bool(llm_stats.get("token_count_estimated", False))
 

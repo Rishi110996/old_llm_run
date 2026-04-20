@@ -1548,8 +1548,8 @@ def analyze_sample_with_state(
         elapsed = time.time() - start_time
         # Extract LLM stats if present in verdict
         llm_call_count = verdict.get("llm_call_count", 0)
-        llm_prompt_tokens = verdict.get("llm_prompt_tokens", 0)
-        llm_completion_tokens = verdict.get("llm_completion_tokens", 0)
+        llm_input_tokens = verdict.get("llm_input_tokens", verdict.get("llm_prompt_tokens", 0))
+        llm_output_tokens = verdict.get("llm_output_tokens", verdict.get("llm_completion_tokens", 0))
         llm_total_tokens = verdict.get("llm_total_tokens", 0)
         llm_estimated_tokens = verdict.get("llm_estimated_tokens", 0)
         llm_token_count_estimated = bool(verdict.get("llm_token_count_estimated", False))
@@ -1560,9 +1560,12 @@ def analyze_sample_with_state(
             "verdict": verdict,
             "analysis_time_sec": round(elapsed, 2),
             "llm_call_count": llm_call_count,
-            "llm_prompt_tokens": llm_prompt_tokens,
-            "llm_completion_tokens": llm_completion_tokens,
+            "llm_input_tokens": llm_input_tokens,
+            "llm_output_tokens": llm_output_tokens,
             "llm_total_tokens": llm_total_tokens,
+            # Backward-compatible aliases for older dashboards/scripts.
+            "llm_prompt_tokens": llm_input_tokens,
+            "llm_completion_tokens": llm_output_tokens,
             "llm_estimated_tokens": llm_estimated_tokens,
             "llm_token_count_estimated": llm_token_count_estimated,
         }
