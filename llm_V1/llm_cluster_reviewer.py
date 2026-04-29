@@ -7,7 +7,7 @@ Stage 4: context-aware LLM review of individual BehaviorClusters.
   concurrent.futures.ThreadPoolExecutor.
 - Each prompt includes the full cross-source evidence bundle for that cluster:
   permissions, components, class source code, strings, YARA -- all at once.
-- Model: claude-4-sonnet for all calls (best available).
+- Model: claude-sonnet-4-6 for all calls (best available).
 - Returns Dict[family, ClusterAssessment].
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ from evidence_schema import APKFacts, BehaviorCluster, ClusterAssessment, Eviden
 # constants
 # ---------------------------------------------------------------------------
 
-REVIEW_MODEL = "claude-4-sonnet"
+REVIEW_MODEL = "claude-sonnet-4-6"
 MAX_CLASS_SOURCE_PER_CLUSTER = 4_000    # bytes of decompiled source per class in prompt
 MAX_STRINGS_PER_CLUSTER      = 30
 MAX_WORKERS                  = 6        # parallel LLM calls

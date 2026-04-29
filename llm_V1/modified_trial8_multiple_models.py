@@ -1426,7 +1426,7 @@ def final_llm_verdict(
 
     # Step 5: log & call LLM
     safe_log(logger, json.dumps(user_content, indent=2, ensure_ascii=False))
-    verdict = call_llm(messages, "claude-4-sonnet", logger, llm_client)
+    verdict = call_llm(messages, "claude-sonnet-4-6", logger, llm_client)
     normalized_verdict = normalize_final_verdict(verdict, logger)
     if normalized_verdict is None:
         raise RuntimeError("Final LLM verdict unavailable or invalid after retries")

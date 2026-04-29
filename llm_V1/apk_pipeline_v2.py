@@ -7,8 +7,8 @@ Stage 0  Full deterministic extraction via APKContext
 Stage 1  Evidence normalization (rule tables)
 Stage 2  Behavior clustering + cross-source corroboration
 Stage 3  Deterministic pre-scoring
-Stage 4  Parallel LLM cluster review (claude-4-sonnet, needs_llm_review only)
-Stage 5  Final synthesis verdict (claude-4-sonnet)
+Stage 4  Parallel LLM cluster review (claude-sonnet-4-6, needs_llm_review only)
+Stage 5  Final synthesis verdict (claude-sonnet-4-6)
 
 Entry point:  run(apk_path, logger, llm_client) -> dict  (same schema as v1)
 """
@@ -35,7 +35,7 @@ import vt_enrichment
 # constants
 # ---------------------------------------------------------------------------
 
-FINAL_MODEL = "claude-4-sonnet"
+FINAL_MODEL = "claude-sonnet-4-6"
 MAX_IOC_OUTPUT = 80     # cap on IOCs returned in final verdict
 
 
