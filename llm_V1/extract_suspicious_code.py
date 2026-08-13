@@ -5,6 +5,7 @@ from androguard.core.dex import DEX
 from androguard.core.analysis.analysis import Analysis
 from androguard.core.analysis.analysis import StringAnalysis
 from androguard.decompiler.decompiler import DecompilerDAD
+from financial_targets import financial_package_pattern, upi_vpa_pattern
 
 
 class APKAnalyzer:
@@ -243,16 +244,13 @@ class APKAnalyzer:
         (re.compile(r"\b(?:ws|wss)://[^\s\"']{6,}", re.I), 0.55, ["c2_networking"]),
         (re.compile(r"pastebin\.com/raw/|paste\.ee/r/|hastebin\.com/raw/|rentry\.co/", re.I), 0.75, ["c2_networking"]),
         (re.compile(r"\b(?:WebSocket|WebSocketClient|PeerConnection(?:Factory)?|ScreenCapturerAndroid|DataChannel)\b", re.I), 0.45, ["c2_networking", "data_exfiltration"]),
-        (
-            re.compile(
-                r"com\.(?:chase|bankofamerica|wellsfargo|citibank|hsbc|barclays|"
-                r"natwest|santander|lloydsbank|ing(?:direct)?|bnpparibas|societegenerale|"
-                r"commerzbank|deutschebank|jpmorgan|usbank)\b",
-                re.I,
-            ),
-            0.85,
-            ["overlay_fraud", "credential_theft"],
-        ),
+        # Financial targets (banking/UPI/payment/trading apps).  This is target
+        # context only; it becomes high-confidence later when corroborated with
+        # overlay/accessibility/app-monitoring/OTP behavior.
+        (financial_package_pattern(), 0.45, ["overlay_fraud", "credential_theft"]),
+        (re.compile(r"\bupi://pay\?[^\"'\s<>]{8,}", re.I), 0.45, ["credential_theft"]),
+        (upi_vpa_pattern(), 0.35, ["credential_theft"]),
+        (re.compile(r"\b(?:performGlobalAction|ACTION_CLICK|ACTION_SET_TEXT|getRootInActiveWindow|findAccessibilityNodeInfosByText|dispatchGesture)\b", re.I), 0.65, ["accessibility_abuse", "credential_theft"]),
         (re.compile(r"\b(?:DexClassLoader|PathClassLoader|InMemoryDexClassLoader)\b"), 0.85, ["dynamic_code_loading"]),
         (re.compile(r"/bin/sh|/system/bin/sh|cmd\.exe", re.I), 0.85, ["privilege_escalation"]),
         (re.compile(r"\bsu\b"), 0.80, ["privilege_escalation"]),

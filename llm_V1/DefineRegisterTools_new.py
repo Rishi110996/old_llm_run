@@ -145,6 +145,8 @@ class APKContext:
             "algorithm": cert["signature_algorithm"]["algorithm"],
             "serial_number": hex(tbs["serial_number"])[2:].strip("L"),
             "thumbprint": hashlib.sha1(cert_obj.dump()).hexdigest(),
+            "thumbprint_sha1": hashlib.sha1(cert_obj.dump()).hexdigest(),
+            "thumbprint_sha256": hashlib.sha256(cert_obj.dump()).hexdigest(),
             "valid_from": int(tbs["validity"]["not_before"].timestamp()),
             "valid_to": int(tbs["validity"]["not_after"].timestamp()),
         }

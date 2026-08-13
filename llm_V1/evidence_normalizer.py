@@ -11,6 +11,12 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Any, Optional
 
 from evidence_schema import APKFacts, EvidenceItem, make_evidence_id
+from financial_targets import (
+    evaluate_official_identity,
+    financial_package_pattern,
+    find_financial_target_references,
+    upi_vpa_pattern,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -354,12 +360,30 @@ _STRING_RULES: List[_StringRule] = [
         "Remote-control transport or real-time screen-streaming framework reference",
         "Video-calling, chat, live-streaming, or remote-support apps",
     ),
+    _StringRule(
+        re.compile(r"\b(?:performGlobalAction|ACTION_CLICK|ACTION_SET_TEXT|getRootInActiveWindow|findAccessibilityNodeInfosByText|dispatchGesture)\b", re.I),
+        "ambiguous", 0.66, ["accessibility_abuse", "credential_theft"],
+        "Accessibility gesture/text APIs can be used to drive another app's UI and capture credentials or OTP flows",
+        "Legitimate accessibility tools and user-consented automation apps",
+    ),
     # -- credential theft --------------------------------------------------
     _StringRule(
         re.compile(r"\bgetCurrentInputConnection\b|\bcommitText\b"),
         "ambiguous", 0.65, ["credential_theft"],
         "IME input connection API; can intercept keystrokes in a custom keyboard",
         "Legitimate keyboard apps (Gboard-style)",
+    ),
+    _StringRule(
+        re.compile(r"\bupi://pay\?[^\"'\s<>]{8,}", re.I),
+        "ambiguous", 0.50, ["credential_theft"],
+        "UPI payment URI in code or config; relevant to payment-fraud analysis when paired with overlay, clipboard, notification, or SMS behavior",
+        "Legitimate UPI-enabled apps and payment integrations",
+    ),
+    _StringRule(
+        upi_vpa_pattern(),
+        "ambiguous", 0.38, ["credential_theft"],
+        "UPI virtual payment address pattern; may be payment config or a fraud destination depending on surrounding behavior",
+        "Legitimate UPI payment apps and merchants",
     ),
     # -- base64 / encoded payloads -----------------------------------------
     _StringRule(
@@ -389,16 +413,11 @@ _STRING_RULES: List[_StringRule] = [
         "Paste-site raw endpoint used as dead-drop C2 relay; changes C2 domain without updating APK to evade domain blocklists",
         "Developer sharing configs via paste-sites (should not appear in a production APK)",
     ),
-    # -- Hardcoded banking app package targets (overlay launch trigger) --------
+    # -- Hardcoded financial app package targets (overlay launch context) -------
     _StringRule(
-        re.compile(
-            r"com\.(?:chase|bankofamerica|wellsfargo|citibank|hsbc|barclays|"
-            r"natwest|santander|lloydsbank|ing(?:direct)?|bnpparibas|societegenerale|"
-            r"commerzbank|deutschebank|jpmorgan|usbank)\b",
-            re.I,
-        ),
-        "malicious", 0.85, ["overlay_fraud"],
-        "Hardcoded banking app package name; indicates overlay trojan maintaining a target list to know when to launch credential-phishing overlay",
+        financial_package_pattern(),
+        "ambiguous", 0.45, ["overlay_fraud", "credential_theft"],
+        "Reference to a known financial/banking/UPI app target; target-list context becomes high-confidence only when combined with overlay/accessibility/app-monitoring behavior",
         "Banking apps that self-reference their own package for deep linking (self-referential, not cross-app)",
     ),
 ]
@@ -693,6 +712,37 @@ _REMOTE_CHANNEL_PATTERNS: Tuple[re.Pattern, ...] = (
     re.compile(r"\bPeerConnection\b"),
     re.compile(r"\bPeerConnectionFactory\b"),
     re.compile(r"\bDataChannel\b"),
+)
+
+_APP_MONITORING_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"\bPackageManager\b"),
+    re.compile(r"\bUsageStatsManager\b"),
+    re.compile(r"\bActivityManager\b"),
+    re.compile(r"\bgetInstalledPackages\b"),
+    re.compile(r"\bgetInstalledApplications\b"),
+    re.compile(r"\bqueryIntentActivities\b"),
+    re.compile(r"\bgetRunningTasks\b"),
+    re.compile(r"\bgetRunningAppProcesses\b"),
+    re.compile(r"\bgetLaunchIntentForPackage\b"),
+)
+
+_OVERLAY_SOURCE_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"\bWindowManager\b"),
+    re.compile(r"\bTYPE_APPLICATION_OVERLAY\b"),
+    re.compile(r"\bTYPE_SYSTEM_ALERT\b"),
+    re.compile(r"\bTYPE_PHONE\b"),
+    re.compile(r"\bSYSTEM_ALERT_WINDOW\b"),
+)
+
+_CLIPBOARD_SOURCE_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"\bClipboardManager\b"),
+    re.compile(r"\bgetPrimaryClip\b"),
+    re.compile(r"\bsetPrimaryClip\b"),
+)
+
+_UPI_SOURCE_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"\bupi://pay\?[^\"'\s<>]{8,}", re.I),
+    upi_vpa_pattern(),
 )
 
 
@@ -1263,10 +1313,145 @@ def _class_tags_contain(class_behavior_tags: Dict[str, List[str]], target_tags: 
     return False
 
 
+def _collect_financial_target_matches(apk_facts: APKFacts) -> List[Dict[str, str]]:
+    matches: List[Dict[str, str]] = []
+
+    for cls_name, string_list in (apk_facts.strings or {}).items():
+        for value in string_list:
+            for match in find_financial_target_references(value):
+                enriched = dict(match)
+                enriched["source"] = f"string:{cls_name}"
+                matches.append(enriched)
+
+    for cls_name, source in (apk_facts.classes or {}).items():
+        for match in find_financial_target_references(source[:20000]):
+            enriched = dict(match)
+            enriched["source"] = f"class:{cls_name}"
+            matches.append(enriched)
+
+    seen = set()
+    deduped: List[Dict[str, str]] = []
+    for match in matches:
+        key = (match.get("target_id"), match.get("match_type"), match.get("source"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(match)
+    return deduped
+
+
+def _summarize_financial_matches(matches: List[Dict[str, str]]) -> Tuple[List[str], List[str], List[str]]:
+    targets: List[str] = []
+    regions: List[str] = []
+    categories: List[str] = []
+    for match in matches:
+        label = match.get("brand") or match.get("target_id") or "unknown"
+        if label not in targets:
+            targets.append(label)
+        region = match.get("region") or ""
+        if region and region not in regions:
+            regions.append(region)
+        category = match.get("category") or ""
+        if category and category not in categories:
+            categories.append(category)
+    return targets, regions, categories
+
+
+def normalize_financial_identity(apk_facts: APKFacts) -> List[EvidenceItem]:
+    """
+    Official-app verification is intentionally certificate-based.  Package name,
+    Play Store presence, app label, or last-updated metadata are not enough to
+    prove that an APK sample is the clean official app.
+    """
+    items: List[EvidenceItem] = []
+    package_name = str((apk_facts.basic_info or {}).get("package_name") or "").strip()
+    if not package_name:
+        return items
+
+    identity = evaluate_official_identity(package_name, apk_facts.certificates or [])
+    status = identity.get("status")
+    entries = identity.get("entries") or []
+    if status == "not_cataloged":
+        return items
+
+    brands = sorted({str(e.get("brand") or e.get("target_id") or "") for e in entries if e})
+    brand_text = ", ".join(b for b in brands if b) or package_name
+    source_loc = "derived:financial_identity"
+
+    if status == "verified":
+        items.append(EvidenceItem(
+            id=make_evidence_id("basic_info", f"verified_official:{package_name}", source_loc),
+            kind="basic_info",
+            value=f"verified official financial app identity: {package_name}",
+            source_location=source_loc,
+            direction="benign",
+            strength=0.85,
+            behavior_tags=["normal_app_behavior"],
+            explanation=f"Package name and signing certificate match the trusted clean baseline for {brand_text}",
+            benign_alternatives="This is a positive identity signal only; malicious runtime behavior would still override it",
+        ))
+    elif status == "cert_mismatch":
+        items.append(EvidenceItem(
+            id=make_evidence_id("cert", f"financial_cert_mismatch:{package_name}", source_loc),
+            kind="cert",
+            value=f"official financial package name signed by unknown certificate: {package_name}",
+            source_location=source_loc,
+            direction="malicious",
+            strength=0.95,
+            behavior_tags=["overlay_fraud", "credential_theft"],
+            explanation=(
+                f"Package name matches a cataloged official financial app for {brand_text}, "
+                "but the APK signing certificate does not match the trusted clean baseline. "
+                "This is a strong repackaging or impersonation signal."
+            ),
+            benign_alternatives="Legitimate certificate rotation only if the new signing lineage is added to the trusted baseline",
+        ))
+    elif status == "unverifiable_no_cert_baseline":
+        items.append(EvidenceItem(
+            id=make_evidence_id("basic_info", f"unverified_official_name:{package_name}", source_loc),
+            kind="basic_info",
+            value=f"financial package name without cert baseline: {package_name}",
+            source_location=source_loc,
+            direction="ambiguous",
+            strength=0.10,
+            behavior_tags=[],
+            explanation=(
+                f"Package name matches a known financial app namespace for {brand_text}, "
+                "but no trusted signing-certificate baseline is configured. Package name or Play Store presence alone cannot prove this APK is clean."
+            ),
+            benign_alternatives="Populate cert_sha1/cert_sha256 from a trusted clean APK baseline to enable positive verification",
+        ))
+    return items
+
+
 def normalize_behavior_chains(apk_facts: APKFacts) -> List[EvidenceItem]:
     items: List[EvidenceItem] = []
     permissions = set(apk_facts.permissions or [])
     component_actions, component_meta = _collect_component_actions_and_meta(apk_facts.components)
+    financial_matches = _collect_financial_target_matches(apk_facts)
+    financial_targets, financial_regions, financial_categories = _summarize_financial_matches(financial_matches)
+
+    if len(financial_targets) >= 3:
+        strength = 0.62 if len(financial_targets) >= 8 else 0.48
+        items.append(EvidenceItem(
+            id=make_evidence_id("basic_info", "financial_target_density", "derived:financial_target_density"),
+            kind="basic_info",
+            value=(
+                "derived:financial_target_density "
+                f"targets={len(financial_targets)} regions={','.join(financial_regions) or 'unknown'} "
+                f"categories={','.join(financial_categories) or 'unknown'}"
+            ),
+            source_location="derived:financial_target_density",
+            direction="ambiguous",
+            strength=strength,
+            behavior_tags=["overlay_fraud", "credential_theft"],
+            explanation=(
+                f"Code or strings reference {len(financial_targets)} financial targets "
+                f"({', '.join(financial_targets[:8])}). This resembles an overlay target list, "
+                "but is not malicious without corroborating app-monitoring, overlay, accessibility, or OTP behavior."
+            ),
+            benign_alternatives="Financial aggregators, payment apps, anti-fraud SDKs, or legitimate apps integrating multiple payment providers",
+        ))
 
     has_notification_capture = (
         bool(permissions & _OTP_CAPTURE_PERMISSIONS)
@@ -1292,6 +1477,63 @@ def normalize_behavior_chains(apk_facts: APKFacts) -> List[EvidenceItem]:
             behavior_tags=["sms_abuse", "credential_theft", "data_exfiltration"],
             explanation="Combined OTP-capture and notification/audio suppression chain suggests the app can intercept one-time codes while hiding alerts from the victim",
             benign_alternatives="Rare combination outside highly privileged notification automation or device-management tooling with explicit user-facing alert controls",
+        ))
+
+    has_app_monitoring = (
+        "android.permission.PACKAGE_USAGE_STATS" in permissions
+        or _class_source_contains(apk_facts.classes, _APP_MONITORING_PATTERNS)
+        or _strings_contain(apk_facts.strings, _APP_MONITORING_PATTERNS)
+    )
+    has_overlay_control = (
+        "android.permission.SYSTEM_ALERT_WINDOW" in permissions
+        or _class_source_contains(apk_facts.classes, _OVERLAY_SOURCE_PATTERNS)
+        or _strings_contain(apk_facts.strings, _OVERLAY_SOURCE_PATTERNS)
+    )
+    has_accessibility_control = (
+        "android.permission.BIND_ACCESSIBILITY_SERVICE" in permissions
+        or "android.accessibilityservice.AccessibilityService" in component_actions
+        or any("android.accessibilityservice" in key for key in component_meta)
+        or _class_source_contains(apk_facts.classes, _REMOTE_CONTROL_PATTERNS)
+        or _strings_contain(apk_facts.strings, _REMOTE_CONTROL_PATTERNS)
+    )
+    if financial_targets and has_app_monitoring and (has_overlay_control or has_accessibility_control):
+        items.append(EvidenceItem(
+            id=make_evidence_id("basic_info", "financial_overlay_target_chain", "derived:financial_overlay_target_chain"),
+            kind="basic_info",
+            value=(
+                "derived:financial_overlay_target_chain "
+                f"targets={len(financial_targets)} regions={','.join(financial_regions) or 'unknown'}"
+            ),
+            source_location="derived:financial_overlay_target_chain",
+            direction="malicious",
+            strength=0.92,
+            behavior_tags=["overlay_fraud", "credential_theft", "accessibility_abuse"],
+            explanation=(
+                "Financial target references are paired with app-monitoring and overlay/accessibility control. "
+                "This is the classic trigger chain used by banking trojans to wait for a victim app and launch a credential overlay."
+            ),
+            benign_alternatives="Rare legitimate financial security apps; should have verified official signing identity and clear user-facing purpose",
+        ))
+
+    has_upi_payment_context = (
+        _strings_contain(apk_facts.strings, _UPI_SOURCE_PATTERNS)
+        or _class_source_contains(apk_facts.classes, _UPI_SOURCE_PATTERNS)
+    )
+    has_clipboard_access = (
+        _class_source_contains(apk_facts.classes, _CLIPBOARD_SOURCE_PATTERNS)
+        or _strings_contain(apk_facts.strings, _CLIPBOARD_SOURCE_PATTERNS)
+    )
+    if has_upi_payment_context and (has_clipboard_access or has_notification_capture) and (has_overlay_control or has_accessibility_control):
+        items.append(EvidenceItem(
+            id=make_evidence_id("basic_info", "upi_fraud_chain", "derived:upi_fraud_chain"),
+            kind="basic_info",
+            value="derived:upi_fraud_chain",
+            source_location="derived:upi_fraud_chain",
+            direction="malicious",
+            strength=0.88,
+            behavior_tags=["credential_theft", "sms_abuse", "overlay_fraud"],
+            explanation="UPI payment identifiers or payment URIs appear alongside clipboard/notification capture and overlay/accessibility control, matching Indian payment-fraud workflows",
+            benign_alternatives="Legitimate UPI payment apps, but those should be verified by signing-certificate baseline and should not combine covert capture with overlay control",
         ))
 
     has_admin_capability = (
@@ -1366,5 +1608,6 @@ def normalize_all(apk_facts: APKFacts) -> List[EvidenceItem]:
     ))
     items.extend(normalize_native_libs(apk_facts.native_libs))
     items.extend(normalize_certs(apk_facts.certificates))
+    items.extend(normalize_financial_identity(apk_facts))
     items.extend(normalize_behavior_chains(apk_facts))
     return items

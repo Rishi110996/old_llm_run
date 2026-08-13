@@ -39,6 +39,10 @@ def resolve_apktool_command():
     if os.path.exists(legacy_jar):
         return ["java", "-jar", legacy_jar]
 
+    tools_jar = r"D:\tools\apktool\apktool_2.11.1.jar"
+    if os.path.exists(tools_jar):
+        return ["java", "-jar", tools_jar]
+
     # Bundled apktool.bat shipped alongside this script in llm_V1/apktool/
     _here = os.path.dirname(os.path.abspath(__file__))
     bundled_bat = os.path.join(_here, "apktool", "apktool.bat")

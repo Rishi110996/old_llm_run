@@ -7,7 +7,7 @@ Stage 4: context-aware LLM review of individual BehaviorClusters.
   concurrent.futures.ThreadPoolExecutor.
 - Each prompt includes the full cross-source evidence bundle for that cluster:
   permissions, components, class source code, strings, YARA -- all at once.
-- Model: claude-sonnet-4-6 for all calls (best available).
+- Model: default_model for all calls on the local OpenAI-compatible test server.
 - Returns Dict[family, ClusterAssessment].
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ from evidence_schema import APKFacts, BehaviorCluster, ClusterAssessment, Eviden
 # constants
 # ---------------------------------------------------------------------------
 
-REVIEW_MODEL = "claude-sonnet-4-6"
+REVIEW_MODEL = "default_model"
 MAX_CLASS_SOURCE_PER_CLUSTER = 4_000    # bytes of decompiled source per class in prompt
 MAX_STRINGS_PER_CLUSTER      = 30
 MAX_WORKERS                  = 6        # parallel LLM calls
@@ -149,6 +149,8 @@ def build_cluster_prompt(
         "INSTRUCTIONS:",
         "- Evaluate whether the evidence above represents legitimate, malicious, or ambiguous behavior.",
         "- Consider the benign_note for each item -- do NOT mark as malicious if a clear legitimate explanation exists.",
+        "- Financial package/brand/UPI references are target context only; require corroborating overlay/accessibility/app-monitoring/OTP capture or cert mismatch before calling them malicious.",
+        "- Package name, app label, Play Store presence, or Play Store last-updated metadata are not proof that an APK is the clean official app; signing-certificate baseline is the identity signal.",
         "- 'malicious' = clear evidence of intentional abuse with no plausible benign explanation.",
         "- 'ambiguous' = suspicious but could be legitimate depending on app purpose.",
         "- 'benign' = all evidence has clear legitimate explanations.",

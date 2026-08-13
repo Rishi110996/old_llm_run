@@ -1,0 +1,30 @@
+{
+  "apk_file": "f8ff85f7f9531e7ebdca21572f9fbd56533306705153244ae2a0f6ae027f2921.apk",
+  "sha256": "f8ff85f7f9531e7ebdca21572f9fbd56533306705153244ae2a0f6ae027f2921",
+  "status": "done",
+  "verdict": {
+    "Malicious": 0,
+    "Suspicious": 0,
+    "Clean": 1,
+    "Risk-Score": 9,
+    "Summary": "The APK exhibits normal app behavior and lacks any known malicious patterns. It has a low pre-score and no IOCs.",
+    "IOCs": [],
+    "llm_call_count": 1,
+    "llm_input_tokens": 969,
+    "llm_output_tokens": 75,
+    "llm_total_tokens": 1044,
+    "llm_prompt_tokens": 969,
+    "llm_completion_tokens": 75,
+    "llm_estimated_tokens": 0,
+    "llm_token_count_estimated": false
+  },
+  "analysis_time_sec": 13.13,
+  "llm_call_count": 1,
+  "llm_input_tokens": 969,
+  "llm_output_tokens": 75,
+  "llm_total_tokens": 1044,
+  "llm_prompt_tokens": 969,
+  "llm_completion_tokens": 75,
+  "llm_estimated_tokens": 0,
+  "llm_token_count_estimated": false
+}

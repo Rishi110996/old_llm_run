@@ -191,6 +191,57 @@ python llm_V1\modified_trial8_multiple_models.py E:\Malware\samples --report-dir
 
 The minimum effective lease is 300 seconds.
 
+## Financial App Identity And Play Store Caveat
+
+The analyzer treats banking, UPI, wallet, and trading app references as target context, not automatic malware proof. A package name, app label, Play Store presence, or Play Store last-updated date is not enough to prove that an APK sample is the clean official app, because a repackaged APK can reuse the same package name.
+
+The stronger identity check is package name plus signing certificate. Financial target metadata lives in:
+
+```text
+llm_V1/financial_targets.json
+```
+
+Each `official_apps` entry can include known-good `cert_sha1` or `cert_sha256` values from a trusted clean baseline:
+
+```json
+{
+  "package_name": "com.phonepe.app",
+  "cert_sha1": ["<trusted-clean-sha1>"],
+  "cert_sha256": ["<trusted-clean-sha256>"]
+}
+```
+
+Get certificate fingerprints from a clean APK you trust:
+
+```powershell
+keytool -printcert -jarfile E:\CleanBaselines\phonepe.apk
+```
+
+Or, if Android build tools are installed:
+
+```powershell
+apksigner verify --print-certs E:\CleanBaselines\phonepe.apk
+```
+
+Behavior policy:
+
+```text
+financial target reference only
+  Ambiguous target context.
+
+financial target reference + app monitoring + overlay/accessibility
+  Strong banking/UPI overlay-fraud signal.
+
+official package name + known-good signing cert
+  Positive clean identity signal, but malicious runtime behavior can still override it.
+
+official package name + configured known-good cert baseline + different signing cert
+  Strong repackaging/impersonation signal.
+
+official package name with no cert baseline configured
+  Unverified. Do not mark clean from package name or Play Store metadata.
+```
+
 ## Enrichment Switches
 
 ### SMBA enrichment
@@ -448,4 +499,3 @@ Common analyzer exit codes:
 ```
 
 In worker mode, a runner can also return the internal key-unavailable code. The parent treats all workers becoming unavailable as a failed batch.
-

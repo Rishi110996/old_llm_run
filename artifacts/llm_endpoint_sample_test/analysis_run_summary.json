@@ -1,0 +1,14 @@
+{
+  "counts": {
+    "done": 1
+  },
+  "run_counts": {
+    "done": 1,
+    "failed": 0,
+    "corrupt": 0,
+    "skipped": 0
+  },
+  "runner_id": "local-test-pid6936-dfa44bd5",
+  "llm_key_name": "local-test",
+  "worker_pid": 6936
+}

@@ -1,0 +1,278 @@
+{
+  "schema_version": 1,
+  "notes": [
+    "Target references are not malicious by themselves. They become high-confidence only when combined with overlay/accessibility/app-monitoring/OTP behavior.",
+    "official_apps cert_sha1/cert_sha256 lists are intentionally empty until populated from trusted clean APK baselines. Package name alone must never be treated as proof of legitimacy."
+  ],
+  "targets": [
+    {
+      "id": "sbi_yono",
+      "region": "IN",
+      "category": "bank",
+      "brand": "State Bank of India / YONO",
+      "package_patterns": ["\\bcom\\.sbi(?:\\.[A-Za-z0-9_.$-]+)+\\b", "\\bcom\\.onlinesbi(?:\\.[A-Za-z0-9_.$-]+)*\\b"],
+      "brand_keywords": ["state bank of india", "onlinesbi", "yono", "sbi"],
+      "domains": ["onlinesbi.sbi", "sbi.co.in"],
+      "official_apps": [
+        {"package_name": "com.sbi.lotusintouch", "cert_sha1": [], "cert_sha256": []}
+      ]
+    },
+    {
+      "id": "hdfc_bank",
+      "region": "IN",
+      "category": "bank",
+      "brand": "HDFC Bank",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*hdfc[A-Za-z0-9_.$-]*\\b", "\\bcom\\.snapwork\\.hdfc\\b"],
+      "brand_keywords": ["hdfc", "hdfcbank", "hdfc bank"],
+      "domains": ["hdfcbank.com"],
+      "official_apps": [
+        {"package_name": "com.snapwork.hdfc", "cert_sha1": [], "cert_sha256": []}
+      ]
+    },
+    {
+      "id": "icici_bank",
+      "region": "IN",
+      "category": "bank",
+      "brand": "ICICI Bank / iMobile",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*icici[A-Za-z0-9_.$-]*\\b", "\\bcom\\.csam\\.icici\\.bank\\.imobile\\b"],
+      "brand_keywords": ["icici", "imobile", "icici bank"],
+      "domains": ["icicibank.com"],
+      "official_apps": [
+        {"package_name": "com.csam.icici.bank.imobile", "cert_sha1": [], "cert_sha256": []}
+      ]
+    },
+    {
+      "id": "axis_bank",
+      "region": "IN",
+      "category": "bank",
+      "brand": "Axis Bank",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*axis[A-Za-z0-9_.$-]*\\b", "\\bcom\\.axis\\.mobile\\b"],
+      "brand_keywords": ["axis", "axis bank"],
+      "domains": ["axisbank.com"],
+      "official_apps": [
+        {"package_name": "com.axis.mobile", "cert_sha1": [], "cert_sha256": []}
+      ]
+    },
+    {
+      "id": "kotak_bank",
+      "region": "IN",
+      "category": "bank",
+      "brand": "Kotak Mahindra Bank",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*kotak[A-Za-z0-9_.$-]*\\b", "\\bcom\\.msf\\.kbank\\.mobile\\b"],
+      "brand_keywords": ["kotak", "kotak mahindra"],
+      "domains": ["kotak.com"],
+      "official_apps": [
+        {"package_name": "com.msf.kbank.mobile", "cert_sha1": [], "cert_sha256": []}
+      ]
+    },
+    {
+      "id": "pnb_bank",
+      "region": "IN",
+      "category": "bank",
+      "brand": "Punjab National Bank",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*(?:pnb|punjabnationalbank)[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["punjab national bank", "pnb"],
+      "domains": ["pnbindia.in"],
+      "official_apps": []
+    },
+    {
+      "id": "bank_of_baroda",
+      "region": "IN",
+      "category": "bank",
+      "brand": "Bank of Baroda",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*(?:bankofbaroda|bobworld|baroda)[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["bank of baroda", "bob world", "bobworld"],
+      "domains": ["bankofbaroda.in"],
+      "official_apps": []
+    },
+    {
+      "id": "canara_bank",
+      "region": "IN",
+      "category": "bank",
+      "brand": "Canara Bank",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*canara[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["canara", "canara bank"],
+      "domains": ["canarabank.com"],
+      "official_apps": []
+    },
+    {
+      "id": "union_bank_india",
+      "region": "IN",
+      "category": "bank",
+      "brand": "Union Bank of India",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*(?:unionbank|unionmobile)[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["union bank of india", "unionbank"],
+      "domains": ["unionbankofindia.co.in"],
+      "official_apps": []
+    },
+    {
+      "id": "idfc_first_bank",
+      "region": "IN",
+      "category": "bank",
+      "brand": "IDFC FIRST Bank",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*idfc[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["idfc", "idfc first"],
+      "domains": ["idfcfirstbank.com"],
+      "official_apps": []
+    },
+    {
+      "id": "yes_bank",
+      "region": "IN",
+      "category": "bank",
+      "brand": "YES Bank",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*yesbank[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["yes bank", "yesbank"],
+      "domains": ["yesbank.in"],
+      "official_apps": []
+    },
+    {
+      "id": "federal_bank",
+      "region": "IN",
+      "category": "bank",
+      "brand": "Federal Bank",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*federal[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["federal bank"],
+      "domains": ["federalbank.co.in"],
+      "official_apps": []
+    },
+    {
+      "id": "phonepe",
+      "region": "IN",
+      "category": "upi_wallet",
+      "brand": "PhonePe",
+      "package_patterns": ["\\bcom\\.phonepe(?:\\.[A-Za-z0-9_.$-]+)*\\b"],
+      "brand_keywords": ["phonepe"],
+      "domains": ["phonepe.com"],
+      "official_apps": [
+        {"package_name": "com.phonepe.app", "cert_sha1": [], "cert_sha256": []}
+      ]
+    },
+    {
+      "id": "paytm",
+      "region": "IN",
+      "category": "upi_wallet",
+      "brand": "Paytm",
+      "package_patterns": ["\\bnet\\.one97\\.paytm(?:\\.[A-Za-z0-9_.$-]+)*\\b", "\\bcom\\.[A-Za-z0-9_.$-]*paytm[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["paytm"],
+      "domains": ["paytm.com"],
+      "official_apps": [
+        {"package_name": "net.one97.paytm", "cert_sha1": [], "cert_sha256": []}
+      ]
+    },
+    {
+      "id": "google_pay_india",
+      "region": "IN",
+      "category": "upi_wallet",
+      "brand": "Google Pay India",
+      "package_patterns": ["\\bcom\\.google\\.android\\.apps\\.nbu\\.paisa\\.user\\b"],
+      "brand_keywords": ["gpay", "google pay"],
+      "domains": ["pay.google.com"],
+      "official_apps": [
+        {"package_name": "com.google.android.apps.nbu.paisa.user", "cert_sha1": [], "cert_sha256": []}
+      ]
+    },
+    {
+      "id": "bhim_upi",
+      "region": "IN",
+      "category": "upi_wallet",
+      "brand": "BHIM UPI",
+      "package_patterns": ["\\bin\\.org\\.npci\\.upiapp\\b", "\\bcom\\.[A-Za-z0-9_.$-]*bhim[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["bhim", "npci"],
+      "domains": ["npci.org.in", "bhimupi.org.in"],
+      "official_apps": [
+        {"package_name": "in.org.npci.upiapp", "cert_sha1": [], "cert_sha256": []}
+      ]
+    },
+    {
+      "id": "mobikwik",
+      "region": "IN",
+      "category": "upi_wallet",
+      "brand": "MobiKwik",
+      "package_patterns": ["\\bcom\\.mobikwik(?:\\.[A-Za-z0-9_.$-]+)*\\b"],
+      "brand_keywords": ["mobikwik"],
+      "domains": ["mobikwik.com"],
+      "official_apps": [
+        {"package_name": "com.mobikwik_new", "cert_sha1": [], "cert_sha256": []}
+      ]
+    },
+    {
+      "id": "cred",
+      "region": "IN",
+      "category": "finance",
+      "brand": "CRED",
+      "package_patterns": ["\\bcom\\.dreamplug\\.androidapp\\b", "\\bcom\\.[A-Za-z0-9_.$-]*cred[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["cred"],
+      "domains": ["cred.club"],
+      "official_apps": [
+        {"package_name": "com.dreamplug.androidapp", "cert_sha1": [], "cert_sha256": []}
+      ]
+    },
+    {
+      "id": "zerodha",
+      "region": "IN",
+      "category": "trading",
+      "brand": "Zerodha",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*zerodha[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["zerodha", "kite"],
+      "domains": ["zerodha.com", "kite.trade"],
+      "official_apps": []
+    },
+    {
+      "id": "groww",
+      "region": "IN",
+      "category": "trading",
+      "brand": "Groww",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*groww[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["groww"],
+      "domains": ["groww.in"],
+      "official_apps": []
+    },
+    {
+      "id": "upstox",
+      "region": "IN",
+      "category": "trading",
+      "brand": "Upstox",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*upstox[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["upstox"],
+      "domains": ["upstox.com"],
+      "official_apps": []
+    },
+    {
+      "id": "angel_one",
+      "region": "IN",
+      "category": "trading",
+      "brand": "Angel One",
+      "package_patterns": ["\\bcom\\.[A-Za-z0-9_.$-]*(?:angelbroking|angelone)[A-Za-z0-9_.$-]*\\b"],
+      "brand_keywords": ["angel one", "angel broking"],
+      "domains": ["angelone.in"],
+      "official_apps": []
+    },
+    {
+      "id": "global_banks",
+      "region": "GLOBAL",
+      "category": "bank",
+      "brand": "Global bank target list",
+      "package_patterns": [
+        "\\bcom\\.(?:chase|bankofamerica|wellsfargo|citibank|hsbc|barclays|natwest|santander|lloydsbank|ing(?:direct)?|bnpparibas|societegenerale|commerzbank|deutschebank|jpmorgan|usbank)(?:\\.[A-Za-z0-9_.$-]+)*\\b"
+      ],
+      "brand_keywords": [],
+      "domains": [],
+      "official_apps": []
+    }
+  ],
+  "upi_vpa_handles": [
+    "upi",
+    "ybl",
+    "axl",
+    "ibl",
+    "paytm",
+    "oksbi",
+    "okhdfcbank",
+    "okicici",
+    "okaxis",
+    "apl",
+    "icici",
+    "sbi",
+    "hdfcbank"
+  ]
+}

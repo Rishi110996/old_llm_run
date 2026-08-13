@@ -1,0 +1,46 @@
+FINANCIAL APPS REQUIRING CERTIFICATE BASELINES
+==============================================
+
+CRITICAL PRIORITY (7 apps - Most targeted by malware)
+------------------------------------------------------
+1. PhonePe                    com.phonepe.app
+2. Google Pay (India)         com.google.android.apps.nbu.paisa.user
+3. Paytm                      net.one97.paytm
+4. SBI YONO                   com.sbi.lotusintouch
+5. HDFC Bank                  com.snapwork.hdfc
+6. ICICI iMobile Pay          com.csam.icici.bank.imobile
+7. Axis Mobile                com.axis.mobile
+
+HIGH PRIORITY (6 apps)
+----------------------
+8. BHIM UPI                   in.org.npci.upiapp
+9. Kotak Bank                 com.msf.kbank.mobile
+10. CRED                      com.dreamplug.androidapp
+11. Amazon Shopping           in.amazon.mShop.android.shopping
+12. Zerodha Kite              com.zerodha.kite3
+13. Groww                     com.nextbillion.groww
+
+MEDIUM PRIORITY (7 apps)
+------------------------
+14. MobiKwik                  com.mobikwik_new
+15. Upstox                    com.upstox.marketapp
+16. Angel One                 com.msf.angelmobile
+17. Punjab National Bank      com.fss.pnb
+18. Bank of Baroda            com.bobibanking.bobimobilebanking
+19. Canara Bank               com.infrasofttech.CanaraBank
+20. Union Bank of India       com.unionbank.ebanking
+
+TOTAL: 20 apps configured in extraction script
+
+HOW TO POPULATE CERTIFICATES
+-----------------------------
+1. Connect Android device with apps installed
+2. Run: .\scripts\extract_app_certificates.ps1
+3. Run: python scripts\update_financial_targets_from_csv.py financial_app_certificates.csv
+4. Verify: Check llm_V1\financial_targets.json for cert_sha1 and cert_sha256 arrays
+
+CURRENT STATUS
+--------------
+All certificate baselines are EMPTY in financial_targets.json
+Package name + Play Store presence ≠ Proof of legitimacy!
+Only certificate verification proves identity.

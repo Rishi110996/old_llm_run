@@ -7,8 +7,8 @@ Stage 0  Full deterministic extraction via APKContext
 Stage 1  Evidence normalization (rule tables)
 Stage 2  Behavior clustering + cross-source corroboration
 Stage 3  Deterministic pre-scoring
-Stage 4  Parallel LLM cluster review (claude-sonnet-4-6, needs_llm_review only)
-Stage 5  Final synthesis verdict (claude-sonnet-4-6)
+Stage 4  Parallel LLM cluster review (default_model, needs_llm_review only)
+Stage 5  Final synthesis verdict (default_model)
 
 Entry point:  run(apk_path, logger, llm_client) -> dict  (same schema as v1)
 """
@@ -35,7 +35,7 @@ import vt_enrichment
 # constants
 # ---------------------------------------------------------------------------
 
-FINAL_MODEL = "claude-sonnet-4-6"
+FINAL_MODEL = "default_model"
 MAX_IOC_OUTPUT = 80     # cap on IOCs returned in final verdict
 
 
@@ -394,6 +394,8 @@ def _build_final_prompt(
         "  Mark Suspicious if clusters are 'ambiguous' with no 'malicious' verdict, "
         "or malicious confidence < 0.70.\n"
         "  Mark Clean if all clusters are 'benign' or below meaningful threshold.\n"
+        "  Do NOT treat package name, Play Store presence, app label, or Play Store last-updated date as proof that an APK is clean.\n"
+        "    A financial app identity is verified only when the signing certificate matches a trusted clean baseline.\n"
         "  Do NOT invent evidence. The cluster assessments are your only source of truth.\n\n"
         "Return STRICT JSON only -- no markdown, no extra keys:\n"
         "{\n"
