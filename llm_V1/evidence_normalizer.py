@@ -17,6 +17,7 @@ from financial_targets import (
     find_financial_target_references,
     upi_vpa_pattern,
 )
+from zintel_cert_checker import check_cert_md5
 
 
 # ---------------------------------------------------------------------------
@@ -1156,6 +1157,39 @@ def normalize_certs(certificates: List[Dict[str, Any]]) -> List[EvidenceItem]:
                 explanation=f"Certificate SHA-1 thumbprint matches known-malicious signing key used by {threat}",
                 benign_alternatives="None -- named malware campaign signing cert",
             ))
+
+        # -- 1b. Zintel catalog check (MD5 fingerprint) ---------------------
+        cert_md5 = str(cert.get("thumbprint_md5", "")).lower().replace(":", "")
+        if cert_md5:
+            zintel_result = check_cert_md5(cert_md5)
+            zintel_status = zintel_result.get("status", "unknown")
+
+            if zintel_status == "malicious":
+                zintel_threat = zintel_result.get("threatname", "")
+                threat_label = f" ({zintel_threat})" if zintel_threat else ""
+                items.append(EvidenceItem(
+                    id=make_evidence_id("cert", f"zintel_malicious:{cert_md5}", source_loc),
+                    kind="cert",
+                    value=f"Zintel blacklisted cert{threat_label}: {cert_md5}",
+                    source_location=source_loc,
+                    direction="malicious",
+                    strength=1.00,
+                    behavior_tags=["anti_analysis"],
+                    explanation=f"Certificate MD5 is blacklisted in Zintel threat intel feed{threat_label}",
+                    benign_alternatives="None -- Zintel-confirmed malicious signing certificate",
+                ))
+            elif zintel_status == "clean":
+                items.append(EvidenceItem(
+                    id=make_evidence_id("cert", f"zintel_clean:{cert_md5}", source_loc),
+                    kind="cert",
+                    value=f"Zintel whitelisted cert: {cert_md5}",
+                    source_location=source_loc,
+                    direction="benign",
+                    strength=0.80,
+                    behavior_tags=["normal_app_behavior"],
+                    explanation="Certificate MD5 is whitelisted in Zintel clean certificate feed",
+                    benign_alternatives="Positive identity signal; malicious runtime behavior can still override",
+                ))
 
         # -- 2. Self-signed ------------------------------------------------
         if subject and issuer and subject == issuer:
