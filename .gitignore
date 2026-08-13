@@ -43,6 +43,12 @@ llm_V1/config.json
 *.swp
 *.swo
 
+# Zintel cert catalogs (synced at runtime, can be large)
+llm_V1/cert_catalogs/
+
+# Temp APK downloads
+temp_apks/
+
 # Ignore test and sample folders
 test_smba_presence/
 
