@@ -596,6 +596,53 @@ class LLMUnavailableError(RuntimeError):
     pass
 
 
+# ---------------------------------------------------------------------------
+# Key-fallback pool: when a key hits budget/rate errors, try other keys
+# ---------------------------------------------------------------------------
+
+_fallback_clients: List[Tuple[str, "OpenAI"]] = []  # [(key_name, client), ...]
+_dead_keys: set = set()  # key names that are confirmed dead (budget/auth)
+_fallback_lock = threading.Lock()
+_active_key_name: str = ""  # current runner's key name (set by run_single_runner)
+
+
+def _is_key_exhaustion_error(exc: Exception) -> bool:
+    """Detect budget, rate-limit, auth errors that mean this key is done."""
+    msg = str(exc or "").lower()
+    markers = (
+        "429", "rate limit", "rate_limit", "ratelimit",
+        "quota", "budget", "exceeded", "exhausted",
+        "insufficient", "billing", "payment required",
+        "401", "403", "unauthorized", "forbidden",
+        "invalid api key", "invalid_api_key",
+    )
+    return any(m in msg for m in markers)
+
+
+def init_fallback_pool(key_configs: List[LLMKeyConfig]) -> None:
+    """Initialize the fallback pool with all available keys."""
+    global _fallback_clients, _dead_keys
+    with _fallback_lock:
+        _fallback_clients = [
+            (kc.name, create_llm_client(kc)) for kc in key_configs
+        ]
+        _dead_keys = set()
+
+
+def _get_fallback_client(exclude_key: str) -> Optional[Tuple[str, "OpenAI"]]:
+    """Get the next working client that isn't the failed one."""
+    with _fallback_lock:
+        for name, client in _fallback_clients:
+            if name != exclude_key and name not in _dead_keys:
+                return name, client
+    return None
+
+
+def _mark_key_dead(key_name: str) -> None:
+    with _fallback_lock:
+        _dead_keys.add(key_name)
+
+
 def compute_file_sha256(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as f:
@@ -753,11 +800,14 @@ def run_tools(apk_path, logger):
             logger.error(f"Tool {tool_name} failed: {e}")
     return results
 
-def call_llm(messages, model, logger, llm_client: OpenAI, max_retries=3):
+def call_llm(messages, model, logger, llm_client: OpenAI, max_retries=3, _current_key_name: str = ""):
     """
     Call LLM through the ZLlama/OpenAI-compatible client.
     Tracks call count and total tokens used in global context.
+    On key exhaustion (budget/rate/auth), tries fallback keys before giving up.
     """
+    if not _current_key_name:
+        _current_key_name = _active_key_name
     runtime_config = load_runtime_config()
     default_metadata = get_llm_request_metadata(runtime_config)
     disabled_guardrail_metadata = get_disabled_guardrail_metadata(runtime_config)
@@ -778,6 +828,26 @@ def call_llm(messages, model, logger, llm_client: OpenAI, max_retries=3):
             try:
                 response = llm_client.chat.completions.create(**request_kwargs)
             except Exception as exc:
+                # Check if this is a key exhaustion error - try fallback keys
+                if _is_key_exhaustion_error(exc) and _current_key_name:
+                    logger.warning(
+                        "Key %s hit budget/rate error: %s. Trying fallback keys...",
+                        _current_key_name, str(exc)[:200],
+                    )
+                    _mark_key_dead(_current_key_name)
+                    fallback = _get_fallback_client(_current_key_name)
+                    if fallback:
+                        fb_name, fb_client = fallback
+                        logger.info("Switching to fallback key: %s", fb_name)
+                        return call_llm(
+                            messages, model, logger, fb_client,
+                            max_retries=max_retries,
+                            _current_key_name=fb_name,
+                        )
+                    else:
+                        logger.error("No fallback keys available, all keys exhausted")
+                        raise
+
                 if not (
                     allow_guardrail_retry
                     and is_guardrail_policy_error(exc)
@@ -1688,6 +1758,14 @@ def run_single_runner(
 
     runner_id = f"{sanitize_name(llm_key_config.name)}-pid{os.getpid()}-{uuid.uuid4().hex[:8]}"
     llm_client = create_llm_client(llm_key_config)
+
+    # Initialize fallback pool with ALL keys so this runner can fall back
+    # to other keys if its primary key runs out of budget
+    global _active_key_name
+    _active_key_name = llm_key_config.name
+    all_keys = load_llm_key_configs(load_runtime_config())
+    if len(all_keys) > 1:
+        init_fallback_pool(all_keys)
     state_db = AnalysisStateDB(os.path.join(report_dir, "analysis_state.sqlite"))
     master_log_name = (
         f"master_summary_{sanitize_name(llm_key_config.name)}_{os.getpid()}.log"
