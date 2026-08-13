@@ -198,7 +198,9 @@ def run_analysis(
 def process_smba_runs(
     smba_dir: Path, report_base: Path, *,
     vt_enrich: bool = False, use_smba: bool = False,
-    force: bool = False, extra_args: Optional[List[str]] = None,
+    force: bool = False, run_name_filter: Optional[str] = None,
+    category_filter: Optional[str] = None,
+    extra_args: Optional[List[str]] = None,
 ) -> Dict:
     """Main orchestrator: discover -> extract -> analyze new SMBA runs."""
     state_path = report_base / STATE_FILE
@@ -209,6 +211,26 @@ def process_smba_runs(
     if not runs:
         print("[*] No SMBA runs with valid zip files found.")
         return {"new_runs": 0, "results": []}
+
+    # Filter by --run-name if specified
+    if run_name_filter:
+        runs = [r for r in runs if r["run_name"] == run_name_filter]
+        if not runs:
+            print(f"[-] Run '{run_name_filter}' not found.")
+            return {"new_runs": 0, "results": []}
+        # --run-name implies --force for that specific run
+        force = True
+
+    # Filter by --category: keep only matching zip entries
+    if category_filter:
+        for run in runs:
+            run["zip_files"] = [z for z in run["zip_files"] if z["category"] == category_filter]
+            run["total_zips"] = len(run["zip_files"])
+        runs = [r for r in runs if r["total_zips"] > 0]
+        if not runs:
+            print(f"[-] Category '{category_filter}' not found in any run.")
+            return {"new_runs": 0, "results": []}
+        force = True
 
     new_runs = [r for r in runs if force or r["run_name"] not in processed]
     if not new_runs:
@@ -281,6 +303,8 @@ def main() -> int:
     parser.add_argument("--vt-enrich", action="store_true", default=False)
     parser.add_argument("--use-smba", action="store_true", default=False)
     parser.add_argument("--force", action="store_true", default=False, help="Re-process already processed runs")
+    parser.add_argument("--run-name", default=None, help="Process only this specific run (e.g. smba_run_1786623599)")
+    parser.add_argument("--category", default=None, help="Process only this category within a run (e.g. customer_manual)")
     parser.add_argument("--list", action="store_true", default=False, dest="list_only", help="List runs without processing")
     args = parser.parse_args()
 
@@ -312,7 +336,12 @@ def main() -> int:
     print(f"{'='*80}\n")
 
     report_base.mkdir(parents=True, exist_ok=True)
-    summary = process_smba_runs(smba_dir, report_base, vt_enrich=args.vt_enrich, use_smba=args.use_smba, force=args.force)
+    summary = process_smba_runs(
+        smba_dir, report_base,
+        vt_enrich=args.vt_enrich, use_smba=args.use_smba,
+        force=args.force, run_name_filter=args.run_name,
+        category_filter=args.category,
+    )
 
     print(f"\n{'='*80}")
     print(f"  Completed: {summary['new_runs']} run(s) processed")
