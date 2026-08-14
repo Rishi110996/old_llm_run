@@ -529,6 +529,44 @@ class AnalysisStateDB:
             )
             conn.commit()
 
+    def release_stale_leases(self) -> int:
+        """Release all in_progress samples whose lease has expired or have no lease."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE analysis_samples
+                SET status = 'failed',
+                    last_error = 'stale lease released',
+                    runner_id = NULL,
+                    lease_expires_at_utc = NULL
+                WHERE status = 'in_progress'
+                  AND (
+                    COALESCE(lease_expires_at_utc, '') <= ?
+                    OR lease_expires_at_utc IS NULL
+                  );
+                """,
+                (now,),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
+    def release_all_in_progress(self) -> int:
+        """Force-release ALL in_progress samples regardless of lease."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE analysis_samples
+                SET status = 'failed',
+                    last_error = 'force released',
+                    runner_id = NULL,
+                    lease_expires_at_utc = NULL
+                WHERE status = 'in_progress';
+                """,
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
     def status_counts(self) -> Dict[str, int]:
         counts: Dict[str, int] = {}
         with self._connect() as conn:
@@ -2065,6 +2103,15 @@ if __name__ == "__main__":
             "Use when batch-analysing VT-sourced samples where the verdict is already known."
         ),
     )
+    parser.add_argument(
+        "--release-stale",
+        action="store_true",
+        default=False,
+        help=(
+            "Release all stuck in_progress samples (expired leases or from crashed runners) "
+            "before starting analysis. Use when a previous run crashed and left samples locked."
+        ),
+    )
     args = parser.parse_args()
     _USE_SMBA = bool(args.use_smba)
     if getattr(args, "smba_jsessionid", None):
@@ -2105,6 +2152,17 @@ if __name__ == "__main__":
 
     report_dir = args.report_dir or folder_path
     os.makedirs(report_dir, exist_ok=True)
+
+    # Release stale leases if requested
+    if args.release_stale:
+        _state_db = AnalysisStateDB(os.path.join(report_dir, "analysis_state.sqlite"))
+        released = _state_db.release_all_in_progress()
+        _state_db.close()
+        if released:
+            print(f"[startup] Released {released} stuck in_progress sample(s)")
+        else:
+            print("[startup] No stuck samples found")
+
     config = load_runtime_config()
     key_config_summary = summarize_llm_key_configuration(config)
     key_configs = load_llm_key_configs(config)

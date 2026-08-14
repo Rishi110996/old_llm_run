@@ -202,6 +202,7 @@ def run_analysis(
     apk_dir: Path, report_dir: Path, *,
     vt_enrich: bool = False, use_smba: bool = False,
     smba_jsessionid: Optional[str] = None,
+    release_stale: bool = True,
     extra_args: Optional[List[str]] = None,
 ) -> int:
     """Run modified_trial8_multiple_models.py on a directory of APKs."""
@@ -216,6 +217,8 @@ def run_analysis(
         cmd.append("--use-smba")
     if smba_jsessionid:
         cmd.extend(["--smba-jsessionid", smba_jsessionid])
+    if release_stale:
+        cmd.append("--release-stale")
     if extra_args:
         cmd.extend(extra_args)
 
