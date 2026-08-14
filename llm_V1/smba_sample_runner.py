@@ -60,7 +60,7 @@ def _save_state(state_path: Path, state: Dict) -> None:
 # Discovery - find SMBA run folders and their zip files
 # ---------------------------------------------------------------------------
 
-def discover_smba_runs(smba_dir: Path) -> List[Dict]:
+def discover_smba_runs(smba_dir: Path, run_name_filter: Optional[str] = None) -> List[Dict]:
     """Find all smba_run_* and smba_susp_* folders with extractable zips."""
     runs = []
 
@@ -73,6 +73,10 @@ def discover_smba_runs(smba_dir: Path) -> List[Dict]:
             continue
         name = entry.name
         if not (name.startswith("smba_run_") or name.startswith("smba_susp_")):
+            continue
+
+        # Skip early if filtering by run name
+        if run_name_filter and name != run_name_filter:
             continue
 
         # Find all zip files in artifacts/ subdirectories
@@ -125,8 +129,31 @@ def discover_smba_runs(smba_dir: Path) -> List[Dict]:
 # Extraction - unzip APKs from sample zips
 # ---------------------------------------------------------------------------
 
-def extract_apks(zip_info: Dict, extract_dir: Path) -> Optional[Path]:
-    """Extract APKs from a zip file. Returns the extraction directory."""
+def _is_hash_filename(name: str) -> bool:
+    """Check if a filename looks like a raw hash (hex chars, no extension)."""
+    bare = name.strip()
+    return len(bare) >= 32 and all(c in "0123456789abcdefABCDEF" for c in bare)
+
+
+def _rename_samples_to_apk(directory: Path) -> int:
+    """Rename hash-named sample files to .apk extension so the analyzer picks them up."""
+    renamed = 0
+    for f in directory.iterdir():
+        if not f.is_file():
+            continue
+        # Already has .apk extension
+        if f.suffix.lower() == ".apk":
+            continue
+        # Hash-named file (no extension or unknown extension)
+        if _is_hash_filename(f.stem) or (f.suffix == "" and f.stat().st_size > 0):
+            new_name = f.with_suffix(".apk")
+            f.rename(new_name)
+            renamed += 1
+    return renamed
+
+
+def extract_samples(zip_info: Dict, extract_dir: Path) -> Optional[Path]:
+    """Extract samples from a zip file and rename hash-named files to .apk."""
     zip_path = Path(zip_info["zip_path"])
     extract_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,8 +161,18 @@ def extract_apks(zip_info: Dict, extract_dir: Path) -> Optional[Path]:
         with zipfile.ZipFile(str(zip_path), "r") as zf:
             zf.extractall(path=str(extract_dir), pwd=ZIP_PASSWORD)
 
+        # Rename hash-named files to .apk
+        renamed = _rename_samples_to_apk(extract_dir)
+        # Also check subdirectories (zips may contain folders)
+        for subdir in extract_dir.iterdir():
+            if subdir.is_dir():
+                renamed += _rename_samples_to_apk(subdir)
+
         apks = list(extract_dir.rglob("*.apk"))
-        print(f"[+] Extracted {len(apks)} APK(s) from {zip_path.name} -> {extract_dir}")
+        if renamed > 0:
+            print(f"[+] Extracted & renamed {len(apks)} sample(s) from {zip_path.name} -> {extract_dir}")
+        else:
+            print(f"[+] Extracted {len(apks)} APK(s) from {zip_path.name} -> {extract_dir}")
         return extract_dir if apks else None
 
     except zipfile.BadZipFile:
@@ -164,6 +201,7 @@ def collect_apk_dirs(base: Path) -> List[Path]:
 def run_analysis(
     apk_dir: Path, report_dir: Path, *,
     vt_enrich: bool = False, use_smba: bool = False,
+    smba_jsessionid: Optional[str] = None,
     extra_args: Optional[List[str]] = None,
 ) -> int:
     """Run modified_trial8_multiple_models.py on a directory of APKs."""
@@ -176,6 +214,8 @@ def run_analysis(
         cmd.append("--vt-enrich")
     if use_smba:
         cmd.append("--use-smba")
+    if smba_jsessionid:
+        cmd.extend(["--smba-jsessionid", smba_jsessionid])
     if extra_args:
         cmd.extend(extra_args)
 
@@ -198,6 +238,7 @@ def run_analysis(
 def process_smba_runs(
     smba_dir: Path, report_base: Path, *,
     vt_enrich: bool = False, use_smba: bool = False,
+    smba_jsessionid: Optional[str] = None,
     force: bool = False, run_name_filter: Optional[str] = None,
     category_filter: Optional[str] = None,
     extra_args: Optional[List[str]] = None,
@@ -207,18 +248,16 @@ def process_smba_runs(
     state = _load_state(state_path)
     processed = state.get("processed_runs", {})
 
-    runs = discover_smba_runs(smba_dir)
+    runs = discover_smba_runs(smba_dir, run_name_filter=run_name_filter)
     if not runs:
-        print("[*] No SMBA runs with valid zip files found.")
+        if run_name_filter:
+            print(f"[-] Run '{run_name_filter}' not found or has no valid zips.")
+        else:
+            print("[*] No SMBA runs with valid zip files found.")
         return {"new_runs": 0, "results": []}
 
-    # Filter by --run-name if specified
+    # --run-name implies --force for that specific run
     if run_name_filter:
-        runs = [r for r in runs if r["run_name"] == run_name_filter]
-        if not runs:
-            print(f"[-] Run '{run_name_filter}' not found.")
-            return {"new_runs": 0, "results": []}
-        # --run-name implies --force for that specific run
         force = True
 
     # Filter by --category: keep only matching zip entries
@@ -251,7 +290,7 @@ def process_smba_runs(
 
         for zip_info in run["zip_files"]:
             category = zip_info.get("category", "unknown")
-            extracted = extract_apks(zip_info, extract_base / category)
+            extracted = extract_samples(zip_info, extract_base / category)
             if extracted:
                 total_apks += len(list(extracted.rglob("*.apk")))
 
@@ -277,7 +316,7 @@ def process_smba_runs(
             apk_count = len(list(apk_dir.glob("*.apk")))
             print(f"\n[*] Category: {cat_name} ({apk_count} APKs)")
 
-            rc = run_analysis(apk_dir, cat_report_dir, vt_enrich=vt_enrich, use_smba=use_smba, extra_args=extra_args)
+            rc = run_analysis(apk_dir, cat_report_dir, vt_enrich=vt_enrich, use_smba=use_smba, smba_jsessionid=smba_jsessionid, extra_args=extra_args)
             run_result["categories"].append({"category": cat_name, "apk_count": apk_count, "report_dir": str(cat_report_dir), "exit_code": rc})
             run_result["exit_codes"].append(rc)
 
@@ -302,6 +341,7 @@ def main() -> int:
     parser.add_argument("--report-base", "-o", default=None, help="Base dir for reports (default: smba_dir/analysis_reports)")
     parser.add_argument("--vt-enrich", action="store_true", default=False)
     parser.add_argument("--use-smba", action="store_true", default=False)
+    parser.add_argument("--smba-jsessionid", default=None, metavar="JSESSIONID", help="Zscaler SMBA JSESSIONID cookie value")
     parser.add_argument("--force", action="store_true", default=False, help="Re-process already processed runs")
     parser.add_argument("--run-name", default=None, help="Process only this specific run (e.g. smba_run_1786623599)")
     parser.add_argument("--category", default=None, help="Process only this category within a run (e.g. customer_manual)")
@@ -339,6 +379,7 @@ def main() -> int:
     summary = process_smba_runs(
         smba_dir, report_base,
         vt_enrich=args.vt_enrich, use_smba=args.use_smba,
+        smba_jsessionid=args.smba_jsessionid,
         force=args.force, run_name_filter=args.run_name,
         category_filter=args.category,
     )
