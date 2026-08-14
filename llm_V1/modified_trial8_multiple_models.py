@@ -253,6 +253,8 @@ def create_llm_client(key_config: LLMKeyConfig) -> OpenAI:
     kwargs: Dict[str, Any] = {"api_key": key_config.api_key}
     if key_config.base_url:
         kwargs["base_url"] = key_config.base_url
+    # Disable SDK-level retries - we handle retries and key fallback ourselves
+    kwargs["max_retries"] = 0
     return OpenAI(**kwargs)
 
 
@@ -913,6 +915,27 @@ def call_llm(messages, model, logger, llm_client: OpenAI, max_retries=3, _curren
                 }
 
         except Exception as e:
+            # Check if this is a budget/rate error at the outer level too
+            # (OpenAI SDK retries internally and surfaces the final error here)
+            if _is_key_exhaustion_error(e) and _current_key_name:
+                logger.warning(
+                    "Key %s exhausted (outer catch): %s",
+                    _current_key_name, str(e)[:200],
+                )
+                _mark_key_dead(_current_key_name)
+                fallback = _get_fallback_client(_current_key_name)
+                if fallback:
+                    fb_name, fb_client = fallback
+                    logger.info("Switching to fallback key: %s", fb_name)
+                    return call_llm(
+                        messages, model, logger, fb_client,
+                        max_retries=max_retries,
+                        _current_key_name=fb_name,
+                    )
+                else:
+                    logger.error("All keys exhausted, no fallback available")
+                    raise LLMUnavailableError(f"All LLM keys exhausted: {e}") from e
+
             logger.error(f"LLM error on attempt {attempt}: {e}")
             continue
 
