@@ -190,6 +190,52 @@ def _review_one(
     logger: logging.Logger,
 ) -> ClusterAssessment:
     messages = build_cluster_prompt(cluster, apk_facts, all_clusters)
+
+    # ── [TEMPORARY] dump evidence items + full prompt going to LLM ──────
+    _evidence_lines = []
+    for _ei in sorted(cluster.evidence_items, key=lambda x: -x.strength):
+        _evidence_lines.append(
+            f"    [{_ei.kind.upper():12s}] dir={_ei.direction:<10s} str={_ei.strength:.2f}  "
+            f"tags={_ei.behavior_tags}  value={_ei.value[:100]}"
+        )
+        _evidence_lines.append(
+            f"                  expl: {_ei.explanation[:150]}"
+        )
+        _evidence_lines.append(
+            f"                  benign: {_ei.benign_alternatives[:120]}"
+        )
+    _user_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
+    _sys_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
+    logger.info(
+        "\n╔══════════════════════════════════════════════════════════════════╗\n"
+        "║  [TEMPORARY] STAGE 4 — LLM CLUSTER REVIEW INPUT                ║\n"
+        "╠══════════════════════════════════════════════════════════════════╣\n"
+        "║  Family : %-54s ║\n"
+        "║  Score  : %-6.3f   Items: %-4d   Chain: %-4d                    ║\n"
+        "║  Mal: %-3d  Amb: %-3d  Ben: %-3d                                 ║\n"
+        "╠══════════════════════════════════════════════════════════════════╣\n"
+        "║  EVIDENCE ITEMS SENT TO LLM:                                   ║\n"
+        "╚══════════════════════════════════════════════════════════════════╝\n"
+        "%s\n"
+        "┌──────────────────────────────────────────────────────────────────┐\n"
+        "│  SYSTEM PROMPT:                                                 │\n"
+        "└──────────────────────────────────────────────────────────────────┘\n"
+        "%s\n"
+        "┌──────────────────────────────────────────────────────────────────┐\n"
+        "│  USER PROMPT:                                                   │\n"
+        "└──────────────────────────────────────────────────────────────────┘\n"
+        "%s\n"
+        "═══════════════════ END STAGE 4 INPUT [%s] ═══════════════════\n",
+        cluster.family,
+        cluster.preliminary_score, len(cluster.evidence_items), cluster.max_chain_length,
+        cluster.malicious_item_count, cluster.ambiguous_item_count, cluster.benign_item_count,
+        "\n".join(_evidence_lines),
+        _sys_msg,
+        _user_msg,
+        cluster.family,
+    )
+    # ── [END TEMPORARY] ─────────────────────────────────────────────────
+
     try:
         result = call_llm_fn(messages, REVIEW_MODEL, logger)
     except Exception as exc:

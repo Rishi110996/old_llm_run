@@ -573,6 +573,45 @@ def run(
     # -- Stage 5: final synthesis -------------------------------------------
     logger.info("[pipeline_v2] Stage 5: final synthesis verdict")
     final_messages = _build_final_prompt(apk_facts, assessments, app_pre_score)
+
+    # ── [TEMPORARY] dump the full final-synthesis prompt going to LLM ───
+    _s5_sys = next((m["content"] for m in final_messages if m["role"] == "system"), "")
+    _s5_user = next((m["content"] for m in final_messages if m["role"] == "user"), "")
+    _s5_assessments_lines = []
+    for _fam, _asmnt in sorted(assessments.items(), key=lambda x: x[1].confidence, reverse=True):
+        _s5_assessments_lines.append(
+            f"    {_fam:<28s}  verdict={_asmnt.verdict:<10s}  conf={_asmnt.confidence:.2f}  "
+            f"skipped={_asmnt.skipped}  iocs={_asmnt.iocs[:5]}"
+        )
+        _s5_assessments_lines.append(
+            f"      reasoning: {_asmnt.reasoning[:200]}"
+        )
+    logger.info(
+        "\n╔══════════════════════════════════════════════════════════════════╗\n"
+        "║  [TEMPORARY] STAGE 5 — FINAL SYNTHESIS LLM INPUT               ║\n"
+        "╠══════════════════════════════════════════════════════════════════╣\n"
+        "║  App pre-score: %-4d                                            ║\n"
+        "║  Model: %-20s                                      ║\n"
+        "║  Cluster assessments fed to LLM:                                ║\n"
+        "╚══════════════════════════════════════════════════════════════════╝\n"
+        "%s\n"
+        "┌──────────────────────────────────────────────────────────────────┐\n"
+        "│  SYSTEM PROMPT:                                                 │\n"
+        "└──────────────────────────────────────────────────────────────────┘\n"
+        "%s\n"
+        "┌──────────────────────────────────────────────────────────────────┐\n"
+        "│  USER PROMPT:                                                   │\n"
+        "└──────────────────────────────────────────────────────────────────┘\n"
+        "%s\n"
+        "═══════════════════ END STAGE 5 INPUT ═══════════════════════\n",
+        app_pre_score,
+        FINAL_MODEL,
+        "\n".join(_s5_assessments_lines),
+        _s5_sys,
+        _s5_user,
+    )
+    # ── [END TEMPORARY] ─────────────────────────────────────────────────
+
     safe_log(logger, json.dumps({"stage5_input": {
         "cluster_summaries": {f: {"verdict": a.verdict, "confidence": a.confidence}
                                for f, a in assessments.items()},
