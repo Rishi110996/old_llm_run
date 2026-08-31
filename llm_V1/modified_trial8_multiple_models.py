@@ -1728,16 +1728,26 @@ def analyze_sample_with_state(
             state_db.finish(sha256=sha256, status="corrupt", last_error=str(e), runner_id=runner_id)
             return "corrupt"
 
-        if isinstance(e, LLMUnavailableError):
+        # Detect key exhaustion errors -- both explicit LLMUnavailableError and
+        # budget/rate/auth errors that bubble up from the OpenAI client.
+        is_key_dead = isinstance(e, LLMUnavailableError) or _is_key_exhaustion_error(e)
+
+        if is_key_dead:
+            # Release the sample so OTHER runners with working keys can pick it up.
+            # Set status back to 'failed' with runner_id=NULL so it's not locked.
             payload = {
                 "apk_file": os.path.basename(apk_path),
                 "sha256": sha256,
                 "status": "failed",
-                "error": str(e),
+                "error": f"[key_exhausted:{llm_key_name}] {e}",
                 "analysis_time_sec": round(elapsed, 2),
             }
             write_json(verdict_path, payload)
             state_db.finish(sha256=sha256, status="failed", last_error=str(e), runner_id=runner_id)
+            logger.warning(
+                "[sample_state] %s released (key %s exhausted) -- available for other runners",
+                apk_name, llm_key_name,
+            )
             return "key_unavailable"
 
         state_db.finish(sha256=sha256, status="failed", last_error=str(e), runner_id=runner_id)
@@ -1846,9 +1856,13 @@ def run_single_runner(
             f"started_at={utc_now_iso()}\n"
         )
         master_log.flush()
+        MAX_CONSECUTIVE_FAILURES = 3   # if this many samples fail in a row, treat as key-dead
+        consecutive_failures = 0
+
         while True:
             pass_completed = 0
             pass_contended = 0
+            pass_failed = 0
             key_unavailable = False
 
             for apk_file in apk_files:
@@ -1874,8 +1888,28 @@ def run_single_runner(
                     )
                     break
 
-                if status in {"done", "failed", "corrupt"}:
-                    run_counts[status] += 1
+                if status == "done":
+                    run_counts["done"] += 1
+                    pass_completed += 1
+                    consecutive_failures = 0    # reset on success
+                    continue
+
+                if status == "failed":
+                    run_counts["failed"] += 1
+                    pass_completed += 1
+                    pass_failed += 1
+                    consecutive_failures += 1
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        key_unavailable = True
+                        print(
+                            f"[runner:{runner_id}] {consecutive_failures} consecutive failures -- "
+                            f"treating key {llm_key_config.name} as unavailable"
+                        )
+                        break
+                    continue
+
+                if status == "corrupt":
+                    run_counts["corrupt"] += 1
                     pass_completed += 1
                     continue
 
