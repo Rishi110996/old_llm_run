@@ -203,21 +203,29 @@ def _generate_cif_entries(iocs: ExtractedIOCs) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def _resolve_yarac():
-    """Find yarac64 or yarac executable."""
+    """Find yarac on system PATH first, then fall back to bundled Windows binary."""
+    found = shutil.which("yarac") or shutil.which("yarac64")
+    if found:
+        return found
+    # Bundled Windows fallback
     for name in ("yarac64.exe", "yarac64", "yarac"):
         p = os.path.join(_SCRIPT_DIR, "yara-master-v4.5.4-win64", name)
         if os.path.isfile(p):
             return p
-    return shutil.which("yarac64") or shutil.which("yarac") or None
+    return None
 
 
 def _resolve_yara():
-    """Find yara64 or yara executable."""
+    """Find yara on system PATH first, then fall back to bundled Windows binary."""
+    found = shutil.which("yara") or shutil.which("yara64")
+    if found:
+        return found
+    # Bundled Windows fallback
     for name in ("yara64.exe", "yara64", "yara"):
         p = os.path.join(_SCRIPT_DIR, "yara-master-v4.5.4-win64", name)
         if os.path.isfile(p):
             return p
-    return shutil.which("yara64") or shutil.which("yara") or None
+    return None
 
 
 def _validate_yara_rule(
@@ -257,7 +265,8 @@ def _validate_yara_rule(
         with open(rule_path, "w", encoding="utf-8") as f:
             f.write(cleaned)
 
-        # 1. Compile check
+        # 1. Compile / syntax check
+        #    Prefer yarac if available; otherwise use `yara <rule> <dummy>` as syntax test.
         if yarac:
             r = subprocess.run(
                 [yarac, rule_path, compiled_path],
@@ -269,10 +278,10 @@ def _validate_yara_rule(
                 result["error"] = r.stderr.strip()[:300]
                 logger.warning("[rule_validator] compile failed: %s", result["error"])
                 return result
-        else:
-            # No yarac; try yara directly as a syntax check
+        elif yara_exe:
+            # yara <rule_file> <target_file> — scan rule file against itself as syntax check
             r = subprocess.run(
-                [yara_exe, rule_path, rule_path],  # scan the rule file itself
+                [yara_exe, rule_path, rule_path],
                 capture_output=True, text=True, timeout=15,
             )
             result["compiles"] = (r.returncode == 0)
@@ -280,15 +289,8 @@ def _validate_yara_rule(
                 result["error"] = r.stderr.strip()[:300]
                 return result
 
-        # 2. Self-match against the sample bin dump
+        # 2. Self-match: scan the sample's bin dump with the new rule
         if bin_file and os.path.isfile(bin_file) and yara_exe:
-            scan_input = compiled_path if os.path.isfile(compiled_path) else rule_path
-            r = subprocess.run(
-                [yara_exe, scan_input if scan_input == rule_path else "-C", scan_input, bin_file]
-                if scan_input != rule_path else [yara_exe, rule_path, bin_file],
-                capture_output=True, text=True, timeout=30,
-            )
-            # Simplify: just scan with the .yara source
             r = subprocess.run(
                 [yara_exe, rule_path, bin_file],
                 capture_output=True, text=True, timeout=30,
