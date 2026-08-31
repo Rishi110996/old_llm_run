@@ -41,6 +41,28 @@ TOP_STRINGS_FOR_PROMPT = 25
 MAX_SOURCE_IN_PROMPT = 3000     # bytes of decompiled source to include
 
 
+def _extract_raw_text(llm_response: Any) -> str:
+    """
+    Extract raw text from call_llm() output.
+
+    call_llm() always tries to parse the response as JSON.  When the LLM
+    returns plain text (like a YARA rule), the parser wraps it as:
+        {"summary": "<raw text>", "relevant": [], "evidence": []}
+    This helper unwraps that back to the original text.
+    """
+    if isinstance(llm_response, str):
+        return llm_response
+    if isinstance(llm_response, dict):
+        # The "summary" key holds the raw non-JSON text from call_llm fallback
+        for key in ("summary", "rule", "yara", "snort", "rules", "content"):
+            val = llm_response.get(key)
+            if isinstance(val, str) and len(val) > 20:
+                return val
+        # Last resort: stringify the whole dict
+        return str(llm_response)
+    return str(llm_response)
+
+
 # ---------------------------------------------------------------------------
 # YARA prompt builder
 # ---------------------------------------------------------------------------
@@ -436,9 +458,7 @@ def generate_rules(
 
         try:
             raw = call_llm(yara_msgs, RULE_GEN_MODEL, logger, llm_client)
-            yara_text = raw if isinstance(raw, str) else str(
-                raw.get("rule") or raw.get("yara") or raw.get("content") or raw
-            )
+            yara_text = _extract_raw_text(raw)
             # Strip markdown fences
             yara_text = yara_text.strip()
             if yara_text.startswith("```"):
@@ -475,9 +495,7 @@ def generate_rules(
         logger.info("[rule_gen] Stage 6c: LLM Snort generation")
         try:
             raw = call_llm(snort_msgs, RULE_GEN_MODEL, logger, llm_client)
-            snort_text = raw if isinstance(raw, str) else str(
-                raw.get("rules") or raw.get("snort") or raw.get("content") or raw
-            )
+            snort_text = _extract_raw_text(raw)
             snort_text = snort_text.strip()
             if snort_text.startswith("```"):
                 lines = snort_text.split("\n")
