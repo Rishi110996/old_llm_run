@@ -605,6 +605,12 @@ def run(
                 normalized.get("Risk-Score", 0))
 
     # -- Stage 6: rule generation (opt-in, malicious only) ------------------
+    logger.info(
+        "[pipeline_v2] Stage 6 gate: generate_rules_flag=%s  Malicious=%s  Risk-Score=%s",
+        generate_rules_flag,
+        normalized.get("Malicious"),
+        normalized.get("Risk-Score", 0),
+    )
     if (
         generate_rules_flag
         and normalized.get("Malicious") == 1
