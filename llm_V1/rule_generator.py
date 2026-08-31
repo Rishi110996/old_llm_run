@@ -17,7 +17,10 @@ _GENERATED_DIR = os.path.join(_SCRIPT_DIR, "generated_rules")
 _YARA_DIR = os.path.join(_GENERATED_DIR, "yara")
 _SNORT_DIR = os.path.join(_GENERATED_DIR, "snort")
 _CIF_DIR = os.path.join(_GENERATED_DIR, "cif")
+_VT_CACHE_PATH = os.path.join(_GENERATED_DIR, "vt_string_cache.json")
+_VT_SEARCH_URL = "https://www.virustotal.com/api/v3/intelligence/search"
 RULE_GEN_MODEL = "claude-sonnet-4-6"
+MAX_VT_CHECKS_PER_SAMPLE = 12
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +164,128 @@ def _rank_dump_strings(
         if len(s) >= 15 and not s.startswith("Landroid") and score == 0:
             score += 0.3
             reason = reason or "long unique string"
+        if score > 0:
+            ranked.append({"value": s, "score": round(score, 2), "reason": reason})
+    ranked.sort(key=lambda x: -x["score"])
+    return ranked
+
+
+# ---------------------------------------------------------------------------
+# 2b. VT content search — validate top candidates for uniqueness
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+_vt_cache: Dict[str, int] = {}
+_vt_cache_loaded = False
+
+
+def _load_vt_cache() -> None:
+    global _vt_cache, _vt_cache_loaded
+    if _vt_cache_loaded:
+        return
+    _vt_cache_loaded = True
+    if os.path.isfile(_VT_CACHE_PATH):
+        try:
+            with open(_VT_CACHE_PATH, "r", encoding="utf-8") as f:
+                _vt_cache.update(json.load(f))
+        except Exception:
+            pass
+
+
+def _save_vt_cache() -> None:
+    os.makedirs(os.path.dirname(_VT_CACHE_PATH), exist_ok=True)
+    try:
+        with open(_VT_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(_vt_cache, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _vt_content_search(s: str, vt_key: str, logger: logging.Logger) -> int:
+    """Search VT for APKs containing this string. Returns hit count or -1."""
+    _load_vt_cache()
+    if s in _vt_cache:
+        return _vt_cache[s]
+    try:
+        import requests as _req
+        r = _req.get(
+            _VT_SEARCH_URL,
+            params={"query": f'tag:apk and content:"{s}"',
+                    "limit": 1, "descriptors_only": "true"},
+            headers={"x-apikey": vt_key, "Accept": "application/json"},
+            timeout=15,
+        )
+        if r.status_code == 429 or not r.ok:
+            return -1
+        data = r.json()
+        count = len(data.get("data", []))
+        if data.get("links", {}).get("next"):
+            count += 100
+        _vt_cache[s] = count
+        _save_vt_cache()
+        _time.sleep(0.5)
+        return count
+    except Exception:
+        return -1
+
+
+def _vt_validate_ranked(
+    ranked: List[Dict[str, Any]],
+    vt_api_key: Optional[str],
+    logger: logging.Logger,
+) -> List[Dict[str, Any]]:
+    """Check top ranked strings on VT. Boost unique, penalize common."""
+    if not vt_api_key:
+        logger.info("[vt_check] No VT key — skipping VT validation")
+        return ranked
+    checked = 0
+    for s in ranked:
+        if checked >= MAX_VT_CHECKS_PER_SAMPLE:
+            break
+        val = s["value"]
+        # Qualifying criteria
+        if s["score"] < 1.0 or len(val) < 10:
+            s["vt_hits"] = -1
+            continue
+        if re.match(r"https?://|^\d{1,3}\.\d{1,3}", val):
+            s["vt_hits"] = -1
+            continue
+        if val.startswith("AMStrings:"):
+            s["vt_hits"] = -1
+            continue
+        if val.startswith("L") and val.endswith(";") and "/" in val:
+            s["vt_hits"] = -1
+            continue
+        hits = _vt_content_search(val, vt_api_key, logger)
+        s["vt_hits"] = hits
+        if hits < 0:
+            continue
+        checked += 1
+        if hits == 0:
+            s["score"] += 2.0
+            s["reason"] += " +VT:unique(0)"
+        elif hits <= 3:
+            s["score"] += 1.5
+            s["reason"] += f" +VT:rare({hits})"
+        elif hits <= 10:
+            s["score"] += 0.5
+            s["reason"] += f" +VT:uncommon({hits})"
+        elif hits <= 50:
+            s["reason"] += f" VT:{hits}"
+        elif hits <= 200:
+            s["score"] -= 1.0
+            s["reason"] += f" -VT:common({hits})"
+        else:
+            s["score"] -= 3.0
+            s["reason"] += f" -VT:FP({hits})"
+        logger.info("[vt_check] '%s' → %d hits (score=%.1f)",
+                    val[:50], hits, s["score"])
+    ranked.sort(key=lambda x: -x["score"])
+    ranked = [s for s in ranked if s["score"] > 0]
+    logger.info("[vt_check] Checked %d strings on VT. %d remain.",
+                checked, len(ranked))
+    return ranked
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +333,11 @@ def _build_yara_prompt(
     # Top 20 verified strings from the bin dump
     str_lines = []
     for rs in ranked_strings[:20]:
-        str_lines.append(f'  [score={rs["score"]:.1f}] "{rs["value"]}"  ({rs["reason"]})')
+        vt_info = ""
+        vt_hits = rs.get("vt_hits", -1)
+        if vt_hits >= 0:
+            vt_info = f" VT_APK_hits={vt_hits}"
+        str_lines.append(f'  [score={rs["score"]:.1f}{vt_info}] "{rs["value"]}"  ({rs["reason"]})')
 
     # Decompiled source of top 2 suspicious classes
     source_blocks = []
@@ -519,7 +648,11 @@ def generate_rules(
         logger.info("[rule_gen] Ranked: %d strings with score > 0. Top: %s",
                     len(ranked),
                     f'{ranked[0]["score"]} "{ranked[0]["value"][:50]}"' if ranked else "none")
+
+        # Step 3b: VT content search validation (if VT key available)
+        ranked = _vt_validate_ranked(ranked, vt_api_key, logger)
         output["ioc_summary"]["ranked_strings"] = len(ranked)
+        output["ioc_summary"]["vt_validated"] = vt_api_key is not None
 
         if len(ranked) >= 3:
             # Step 4: Get example rules for this category
