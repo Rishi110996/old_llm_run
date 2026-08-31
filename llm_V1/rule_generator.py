@@ -591,6 +591,21 @@ def _guess_family(verdict: Dict, yara_matches: List) -> str:
     return "Gen"
 
 
+def _guess_category(assessments: Dict) -> str:
+    mal = [f for f, a in assessments.items() if a.verdict == "malicious"]
+    if "overlay_fraud" in mal or "credential_theft" in mal:
+        return "Banker"
+    if "data_exfiltration" in mal and "call_interception" in mal:
+        return "Spyware"
+    if "sms_abuse" in mal:
+        return "Trojan"
+    if "dynamic_code_loading" in mal:
+        return "Dropper"
+    if "c2_networking" in mal:
+        return "RAT"
+    return "Trojan"
+
+
 # ---------------------------------------------------------------------------
 # 9. Main entry point
 # ---------------------------------------------------------------------------
