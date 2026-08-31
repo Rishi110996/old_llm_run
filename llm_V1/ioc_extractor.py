@@ -192,6 +192,7 @@ def _mine_evidence(evidence_items, yc, cd, ci, ia, c2u, tg, pu, cc, oc, seen):
 
 
 def _mine_raw_strings(apk_facts, yc, am, er, c2u, tg, cd, seen):
+    # 1. Mine strings extracted per class
     for cls, strings in apk_facts.strings.items():
         for s in strings:
             s = s.strip()
@@ -222,6 +223,47 @@ def _mine_raw_strings(apk_facts, yc, am, er, c2u, tg, cd, seen):
                                    "kind": "raw_string",
                                    "explanation": f"String from {cls}",
                                    "behavior_tags": []})
+
+    # 2. Mine method names and string literals from decompiled source code
+    #    These are the highest-value YARA strings (function/method names survive
+    #    across variants).
+    _METHOD_RE = re.compile(
+        r"(?:public|private|protected)\s+\w+\s+(\w{6,})\s*\(", re.I
+    )
+    _LITERAL_RE = re.compile(r'"([^"]{8,120})"')
+    for cls, source in apk_facts.classes.items():
+        if not source:
+            continue
+        api_score = apk_facts.class_api_scores.get(cls, 0)
+        if api_score < 0.20:
+            continue
+        # Extract method names
+        for m in _METHOD_RE.finditer(source):
+            name = m.group(1)
+            if name in seen or _is_noise_string(name):
+                continue
+            if name in ("toString", "hashCode", "equals", "valueOf",
+                        "onCreate", "onDestroy", "onResume", "onPause",
+                        "onStart", "onStop", "getClass"):
+                continue
+            seen.add(name)
+            yc.append({"value": name, "source": f"method:{cls}",
+                       "direction": "malicious", "strength": 0.65,
+                       "kind": "method_name",
+                       "explanation": f"Method from suspicious class {cls} (api_score={api_score:.2f})",
+                       "behavior_tags": apk_facts.class_behavior_tags.get(cls, [])})
+        # Extract string literals from source
+        for m in _LITERAL_RE.finditer(source):
+            val = m.group(1)
+            if val in seen or _is_noise_string(val):
+                continue
+            seen.add(val)
+            yc.append({"value": val, "source": f"literal:{cls}",
+                       "direction": "malicious", "strength": 0.60,
+                       "kind": "source_literal",
+                       "explanation": f"String literal in class {cls}",
+                       "behavior_tags": []})
+
     return yc, am, er, c2u, tg, cd, seen
 
 

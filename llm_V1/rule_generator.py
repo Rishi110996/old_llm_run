@@ -109,8 +109,20 @@ def _build_yara_prompt(
         "- C2 URLs/domains are valid but mark them as low-stability (variants "
         "will change them). Use them as optional, not required.\n"
         "- Include meta: threatname, category, risk=127, date, author.\n"
-        "- The rule will be scanned against APK dump bin files (text format "
-        "containing manifest, smali, strings, permissions).\n"
+        "- CRITICAL: The rule scans APK dump .bin files created by apktool. "
+        "The dump contains: decoded AndroidManifest.xml, smali disassembly of "
+        "all DEX files, res/values/strings.xml, certificate info, and file paths.\n"
+        "- In the dump, Java class names appear in Dalvik format with SLASHES: "
+        "Lcom/example/MyClass; not com.example.MyClass. Method names and string "
+        "literals appear as plain ASCII in the smali. Use strings that actually "
+        "appear in smali/manifest, NOT Java dot-notation package names.\n"
+        "- Good YARA strings for Android: method/function names (e.g. "
+        "'readSMSBox', 'executeShell', 'sendToC2'), C2 URL paths (e.g. "
+        "'/set/log_add.php'), command strings, AMStrings:* entries, "
+        "Dalvik class references (Lcom/pkg/ClassName;), and unique manifest "
+        "entries.\n"
+        "- BAD YARA strings: Java dot-notation package names (won't match), "
+        "generic Android permission strings, common SDK class names.\n"
         "- Return ONLY the complete YARA rule text. No markdown fences, no "
         "explanation, no extra text.\n"
     )
@@ -474,12 +486,18 @@ def generate_rules(
             validation = _validate_yara_rule(yara_text, bin_file, logger)
             output["yara_validation"] = validation
 
-            if validation["valid"]:
+            if validation["compiles"] and validation["self_matches"]:
                 fname = f"Android_{iocs.family}_{sha_short}_{date_tag}.yara"
                 path = _save_rule(_YARA_DIR, fname, yara_text)
                 output["yara_rule_path"] = path
                 logger.info("[rule_gen] YARA saved: %s (compiles=%s self_match=%s)",
                             path, validation["compiles"], validation["self_matches"])
+            elif validation["compiles"] and not validation["self_matches"]:
+                logger.warning(
+                    "[rule_gen] YARA compiles but does NOT match the source sample -- "
+                    "rule NOT saved. The LLM likely used strings not present in the "
+                    "APK dump .bin file."
+                )
             else:
                 logger.warning("[rule_gen] YARA failed validation: %s",
                                validation.get("error", "unknown"))
