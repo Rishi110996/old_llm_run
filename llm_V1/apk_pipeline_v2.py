@@ -455,6 +455,7 @@ def run(
     smba_jsessionid: str = "",
     vt_api_key: Optional[str] = None,
     no_vt_detection: bool = False,
+    generate_rules_flag: bool = False,
 ) -> Dict[str, Any]:
     """
     Run the v2 pipeline.  Returns a verdict dict matching the v1 schema:
@@ -602,5 +603,31 @@ def run(
                 normalized.get("Malicious") and "MALICIOUS" or
                 normalized.get("Suspicious") and "SUSPICIOUS" or "CLEAN",
                 normalized.get("Risk-Score", 0))
+
+    # -- Stage 6: rule generation (opt-in, malicious only) ------------------
+    if (
+        generate_rules_flag
+        and normalized.get("Malicious") == 1
+        and normalized.get("Risk-Score", 0) >= 70
+    ):
+        try:
+            logger.info("[pipeline_v2] Stage 6: rule generation")
+            from rule_generator import generate_rules as _gen_rules
+            rule_output = _gen_rules(
+                apk_path=apk_path,
+                apk_facts=apk_facts,
+                evidence_items=evidence_items,
+                clusters=clusters,
+                assessments=assessments,
+                verdict=normalized,
+                yara_matches=apk_facts.yara_matches,
+                logger=logger,
+                llm_client=llm_client,
+                vt_api_key=vt_api_key,
+            )
+            normalized["generated_rules"] = rule_output
+        except Exception as exc:
+            logger.error("[pipeline_v2] Stage 6 failed: %s", exc)
+            normalized["generated_rules"] = {"error": str(exc)}
 
     return normalized

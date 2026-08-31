@@ -43,6 +43,7 @@ _RUNTIME_CONFIG_CACHE: Optional[Dict[str, Any]] = None
 _USE_SMBA: bool = False
 _VT_API_KEY: Optional[str] = None
 _SMBA_JSESSIONID: Optional[str] = None  # overrides .env when set via --smba-jsessionid
+_GENERATE_RULES: bool = False           # --generate-rules: Stage 6 YARA/Snort/CIF generation
 
 
 @dataclass(frozen=True)
@@ -1579,6 +1580,7 @@ def analyze_apk_pipeline(apk_path, logger, llm_client: OpenAI):
         smba_jsessionid=_SMBA_JSESSIONID or "",
         vt_api_key=_VT_API_KEY,
         no_vt_detection=_NO_VT_DETECTION,
+        generate_rules_flag=_GENERATE_RULES,
     )
 
 
@@ -2112,6 +2114,15 @@ if __name__ == "__main__":
             "before starting analysis. Use when a previous run crashed and left samples locked."
         ),
     )
+    parser.add_argument(
+        "--generate-rules",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable Stage 6: generate YARA, Snort, and CIF rules for malicious samples "
+            "(Risk-Score >= 70). Rules are saved to llm_V1/generated_rules/."
+        ),
+    )
     args = parser.parse_args()
     _USE_SMBA = bool(args.use_smba)
     if getattr(args, "smba_jsessionid", None):
@@ -2138,6 +2149,7 @@ if __name__ == "__main__":
             print(f"[startup] WARNING: could not update .env with new JSESSIONID: {_env_exc}")
             print(f"[startup] SMBA will use the token directly from --smba-jsessionid")
     _NO_VT_DETECTION = bool(args.no_vt_detection)
+    _GENERATE_RULES = bool(args.generate_rules)
     if args.vt_enrich:
         import vt_enrichment as _vt_mod
         _vt_config_path = _vt_mod.resolve_vt_config_path()
