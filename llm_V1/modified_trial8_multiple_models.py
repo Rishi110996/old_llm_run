@@ -1978,6 +1978,17 @@ def run_multi_key_parent(
             "--lease-hours",
             str(lease_duration_sec / 3600.0),
         ]
+        # Forward enrichment / feature flags to worker subprocesses
+        if _USE_SMBA:
+            cmd.append("--use-smba")
+        if _SMBA_JSESSIONID:
+            cmd.extend(["--smba-jsessionid", _SMBA_JSESSIONID])
+        if _VT_API_KEY:
+            cmd.append("--vt-enrich")
+        if _NO_VT_DETECTION:
+            cmd.append("--no-vt-detection")
+        if _GENERATE_RULES:
+            cmd.append("--generate-rules")
         print(f"[parent] starting worker for key={key_config.name}: {' '.join(cmd)}")
         proc = subprocess.Popen(cmd, cwd=SCRIPT_DIR)
         worker_procs.append((key_config, proc))
