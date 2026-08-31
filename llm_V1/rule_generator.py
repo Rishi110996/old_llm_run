@@ -40,6 +40,22 @@ _NOISE_EXACT = {
     "private", "protected", "static", "final", "void", "this", "super",
     "android", "intent", "action", "permission", "provider", "receiver",
     "service", "activity", "application", "manifest", "xmlns",
+    "accessibility", "notification", "broadcast", "content", "context",
+    "handler", "listener", "callback", "adapter", "fragment", "layout",
+    "inflater", "viewgroup", "textview", "imageview", "linearlayout",
+    "override", "abstract", "interface", "implements", "extends",
+    "exception", "runnable", "serializable", "parcelable", "drawable",
+    "resource", "bundle", "charset", "encoding", "utf-8", "utf-16",
+    "hashmap", "arraylist", "iterator", "collections", "objects",
+    "inputstream", "outputstream", "buffered", "connection", "socket",
+    "response", "request", "message", "package", "version", "target",
+    "minimum", "compile", "build", "config", "default", "settings",
+    "manager", "system", "process", "runtime", "security", "crypto",
+    "cipher", "digest", "signature", "certificate", "keystore",
+    "Ljava/lang/String", "Ljava/lang/Object", "Ljava/lang/Class",
+    "Ljava/util/List", "Ljava/util/Map", "Ljava/util/Set",
+    "Landroid/os/Bundle", "Landroid/content/Context",
+    "Landroid/content/Intent", "Landroid/app/Activity",
 }
 _NOISE_RE = re.compile(
     r"^(?:\d+$|0x[0-9a-f]+$|[A-Za-z0-9+/]{80,}={0,2}$|[0-9a-f]{32,}$)", re.I
@@ -111,16 +127,18 @@ def _rank_dump_strings(
     mal_class_names = {
         c for c, score in apk_facts.class_api_scores.items() if score >= 0.40
     }
-    mal_class_fragments = set()
+    # Use only specific class-name fragments (last component = actual class name, ≥8 chars)
+    mal_class_last_parts = set()
     for c in mal_class_names:
-        for part in c.split("."):
-            if len(part) >= 5:
-                mal_class_fragments.add(part.lower())
-    # Source code literals from decompiled classes
+        parts = c.split(".")
+        last = parts[-1] if parts else ""
+        if len(last) >= 8 and last[0].isupper():
+            mal_class_last_parts.add(last.lower())
+    # Source code literals from decompiled classes (exact match only)
     source_literals: Set[str] = set()
     for cls, src in apk_facts.classes.items():
         if src and apk_facts.class_api_scores.get(cls, 0) >= 0.30:
-            for m in re.finditer(r'"([^"]{8,80})"', src):
+            for m in re.finditer(r'"([^"]{10,80})"', src):
                 source_literals.add(m.group(1).lower())
 
     ranked: List[Dict[str, Any]] = []
@@ -128,42 +146,41 @@ def _rank_dump_strings(
         sl = s.lower()
         score = 0.0
         reason = ""
-        # Exact IOC match
-        if sl in ioc_set or any(sl in ioc for ioc in ioc_set):
+        # Exact IOC match (full string, not substring)
+        if sl in ioc_set:
             score += 3.0
-            reason = "IOC match"
-        # Evidence item match
-        if sl in evidence_values or any(sl in ev for ev in evidence_values):
+            reason = "IOC exact"
+        # Evidence item exact match
+        if sl in evidence_values:
             score += 2.0
-            reason = reason or "evidence match"
-        # Source code literal match
+            reason = reason or "evidence exact"
+        # Source code literal exact match
         if sl in source_literals:
             score += 2.5
             reason = reason or "source literal"
-        # Malicious class fragment match
-        if any(frag in sl for frag in mal_class_fragments):
-            score += 1.5
-            reason = reason or "malicious class fragment"
+        # Malicious class name match (last part only, e.g. "SmsReceiver")
+        if sl in mal_class_last_parts:
+            score += 2.0
+            reason = reason or "malicious class name"
         # C2/URL patterns
         if re.match(r"https?://|/\w+\.php|api\.telegram\.org", s, re.I):
             score += 2.0
-            reason = reason or "C2/URL pattern"
-        # Dalvik class refs (Lcom/pkg/Class;)
-        if re.match(r"L[a-z]+/", s) and s.endswith(";"):
-            score += 1.0
-            reason = reason or "Dalvik class ref"
+            reason = reason or "C2/URL"
+        # Dalvik class refs from non-SDK packages
+        if re.match(r"L[a-z]+/", s) and s.endswith(";") and not re.match(r"L(?:android|java|kotlin|androidx|com/google)/", s):
+            score += 1.5
+            reason = reason or "Dalvik non-SDK class"
         # AMStrings
         if s.startswith("AMStrings:"):
             score += 3.0
-            reason = reason or "AMStrings entry"
-        # Bot/malware keywords
-        if re.search(r"bot[./]|inject|c2|exfil|steal|sms|hook|admin|payload", sl):
-            score += 1.0
-            reason = reason or "malware keyword"
-        # Unique-looking strings (mixed case, specific)
-        if len(s) >= 15 and not s.startswith("Landroid") and score == 0:
-            score += 0.3
-            reason = reason or "long unique string"
+            reason = reason or "AMStrings"
+        # Bot/inject path patterns (must have slash or dot context)
+        if re.search(r"[/.]bot[/.]|[/.]inject|[/.]c2[/.]|[/.]exfil|[/.]steal|[/.]hook", sl):
+            score += 1.5
+            reason = reason or "bot/inject path"
+        # Skip generic single words — only rank multi-word or structured strings
+        if score == 0:
+            continue
         if score > 0:
             ranked.append({"value": s, "score": round(score, 2), "reason": reason})
     ranked.sort(key=lambda x: -x["score"])
