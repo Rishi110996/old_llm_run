@@ -11,7 +11,7 @@ _CD=os.path.join(_GD,"cif")
 _VCP=os.path.join(_GD,"vt_string_cache.json")
 _VSU="https://www.virustotal.com/api/v3/intelligence/search"
 MODEL="claude-sonnet-4-6"
-MAX_VT=12
+MAX_VT=25
 
 _SDK=re.compile(
     r"^(?:Landroid/|Ljava/|Ljavax/|Lkotlin/|Landroidx/|Ldalvik/"
@@ -85,12 +85,28 @@ def rank_strings(parsed,apk_facts,evidence_items,verdict):
         if src and apk_facts.class_api_scores.get(cls,0)>=0.30:
             for m in re.finditer(r'"([^"]{8,80})"',src): src_lits.add(m.group(1).lower())
     ranked=[]
+    # Force-rank verdict IOCs that exist in the dump
+    dump_set=set(parsed["dex_strings"])
+    for ioc in (verdict.get("IOCs") or []):
+        # Extract short name (last segment after dots)
+        parts=ioc.replace("permission: ","").replace("embedded APK: ","").replace("package path: ","").replace("package: ","").replace("Certificate ","").split(".")
+        short=parts[-1] if parts else ""
+        if len(short)>=8 and short in dump_set and not short.startswith("android"):
+            ranked.append({"value":short,"score":6.0,"reason":"verdict_IOC","type":"dex_string"})
+        # Also try the full dot-notation (may match in manifest section)
+        if len(ioc)>=15 and ioc in dump_set:
+            ranked.append({"value":ioc,"score":6.0,"reason":"verdict_IOC_full","type":"dex_string"})
     for s in parsed["dex_strings"]:
-        sl=s.lower(); sc,r=0.0,""
+        sl=s.lower()
+        # Skip randomized package names (com.xxxxx.yyyyy)
+        if re.match(r"^com\.[a-z]{5,12}\.[a-z]{5,12}$",s): continue
+        sc,r=0.0,""
         if sl in iocs: sc+=5.0; r="IOC"
         if sl in src_lits: sc+=4.0; r=r or "src_lit"
         if re.match(r"https?://|/\w+\.php|api\.telegram\.org",s,re.I): sc+=3.5; r=r or "C2"
-        if re.search(r"[/.](?:bot|inject|c2|exfil|steal|hook|socks|vnc|screencast)[/.]",sl): sc+=3.0; r=r or "bot_path"
+        # Bot infrastructure strings (highest non-IOC priority)
+        if re.search(r"(?:bot[./]|[Ii]nject|[Ss]ocks5|[Ss]creencast|SmsReceiver|MmsReceiver|HelperAdmin|PeriodicJob|HeadlessSms)",s): sc+=4.5; r=r or "bot_infra"
+        elif re.search(r"[/.](?:c2|exfil|steal|hook|vnc)[/.]",sl): sc+=3.0; r=r or "bot_path"
         if re.match(r"[a-z]+_[a-z]+_[a-z]+",sl) and len(s)>=12:
             if re.search(r"sms|upload|send|delete|record|capture|inject|install|command|task|kill",sl): sc+=3.0; r=r or "bot_cmd"
         if re.match(r"[A-Z][a-z]+[A-Z][a-z]+",s) and len(s)>=12:
