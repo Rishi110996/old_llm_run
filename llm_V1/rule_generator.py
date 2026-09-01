@@ -421,11 +421,25 @@ def generate_rules(apk_path,apk_facts,evidence_items,clusters,assessments,verdic
                 sel_msgs=build_select_prompt(ranked,apk_facts,verdict,fam)
                 sel_raw=call_llm(sel_msgs,MODEL,logger,llm_client)
                 sel_text=_strip_md(_raw_text(sel_raw))
+                logger.info("[rule_gen] Phase 1 raw type=%s len=%d first50='%s'",type(sel_text).__name__,len(sel_text) if isinstance(sel_text,str) else 0,str(sel_text)[:50])
                 try:
                     selected=json.loads(sel_text) if isinstance(sel_text,str) else sel_text
-                    if isinstance(selected,dict): selected=selected.get("selected",selected.get("strings",list(selected.values())[0] if selected else []))
+                    if isinstance(selected,dict):
+                        # LLM might return {"summary":"[{...}]"} from call_llm wrapper
+                        for k in ("summary","selected","strings"):
+                            v=selected.get(k)
+                            if isinstance(v,str) and v.strip().startswith("["):
+                                selected=json.loads(v.strip())
+                                break
+                            elif isinstance(v,list):
+                                selected=v
+                                break
+                        else:
+                            selected=[]
                     if not isinstance(selected,list): selected=[]
-                except: selected=[]
+                except Exception as parse_err:
+                    logger.warning("[rule_gen] Phase 1 JSON parse error: %s",parse_err)
+                    selected=[]
                 logger.info("[rule_gen] Phase 1: LLM selected %d strings",len(selected))
                 if not selected:
                     logger.warning("[rule_gen] LLM returned no selections, using top 15 ranked")
