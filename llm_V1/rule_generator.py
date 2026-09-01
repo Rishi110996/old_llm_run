@@ -32,7 +32,30 @@ _NOISE_PREFIXES = (
     "com.google.firebase.", "com.google.ads.", "com.google.gson.",
     "com.squareup.", "com.fasterxml.", "com.facebook.", "org.apache.",
     "org.json.", "org.xml.", "org.w3c.", "org.slf4j.",
+    # Chinese SDKs (very common in Chinese market apps)
+    "cn.jpush.", "cn.jiguang.", "com.alibaba.", "com.alipay.",
+    "com.tencent.", "com.baidu.", "com.xiaomi.", "com.huawei.",
+    "com.umeng.", "com.taobao.", "com.amap.", "com.sina.",
+    # Other common SDKs
+    "bolts.", "com.crashlytics.", "io.fabric.",
+    "com.adjust.", "com.appsflyer.", "com.branch.",
+    # Dump format noise
     "res/", "META-INF/", "filename:", "filetype:",
+)
+
+# Dalvik class prefixes that are SDK/library noise (for Lcom/pkg/Class; format)
+_DALVIK_SDK_PREFIXES = (
+    "Landroid/", "Ljava/", "Ljavax/", "Lkotlin/", "Lkotlinx/",
+    "Landroidx/", "Ldalvik/", "Lokhttp3/", "Lokio/", "Lretrofit2/",
+    "Lcom/google/", "Lcom/squareup/", "Lcom/fasterxml/", "Lcom/facebook/",
+    "Lorg/apache/", "Lorg/json/", "Lorg/xml/",
+    # Chinese SDKs in Dalvik format
+    "Lcn/jpush/", "Lcn/jiguang/", "Lcom/alibaba/", "Lcom/alipay/",
+    "Lcom/tencent/", "Lcom/baidu/", "Lcom/xiaomi/", "Lcom/huawei/",
+    "Lcom/umeng/", "Lcom/taobao/", "Lcom/amap/", "Lcom/sina/",
+    # Other common SDKs in Dalvik format
+    "Lbolts/", "Lcom/crashlytics/", "Lio/fabric/",
+    "Lcom/adjust/", "Lcom/appsflyer/", "Lcom/branch/",
 )
 _NOISE_EXACT = {
     "true", "false", "null", "none", "name", "value", "type", "class",
@@ -103,6 +126,9 @@ def _filter_dump_strings(raw_strings: List[str]) -> List[str]:
             continue
         if any(s.startswith(p) for p in _NOISE_PREFIXES):
             continue
+        # Filter Dalvik SDK class refs early
+        if s.startswith("L") and "/" in s and any(s.startswith(p) for p in _DALVIK_SDK_PREFIXES):
+            continue
         if s.startswith(".") and len(s) > 1 and s[1:2].islower():
             continue
         seen.add(s)
@@ -167,7 +193,9 @@ def _rank_dump_strings(
             score += 2.0
             reason = reason or "C2/URL"
         # Dalvik class refs from non-SDK packages
-        if re.match(r"L[a-z]+/", s) and s.endswith(";") and not re.match(r"L(?:android|java|kotlin|androidx|com/google)/", s):
+        if re.match(r"L[a-z]+/", s) and s.endswith(";"):
+            if any(s.startswith(p) for p in _DALVIK_SDK_PREFIXES):
+                continue  # SDK class — skip entirely, don't even rank
             score += 1.5
             reason = reason or "Dalvik non-SDK class"
         # AMStrings
@@ -291,11 +319,11 @@ def _vt_validate_ranked(
         elif hits <= 50:
             s["reason"] += f" VT:{hits}"
         elif hits <= 200:
-            s["score"] -= 1.0
-            s["reason"] += f" -VT:common({hits})"
+            s["score"] = 0  # too common — drop it
+            s["reason"] += f" -VT:DROP({hits})"
         else:
-            s["score"] -= 3.0
-            s["reason"] += f" -VT:FP({hits})"
+            s["score"] = 0  # extremely common — drop it
+            s["reason"] += f" -VT:DROP({hits})"
         logger.info("[vt_check] '%s' → %d hits (score=%.1f)",
                     val[:50], hits, s["score"])
     ranked.sort(key=lambda x: -x["score"])
@@ -472,6 +500,31 @@ def _extract_raw_text(llm_response: Any) -> str:
                 return val
         return str(llm_response)
     return str(llm_response)
+
+
+def _relax_yara_condition(rule_text: str) -> str:
+    """Replace the condition block with a simple 'N of them' to rescue a non-matching rule."""
+    # Count the number of string variables
+    string_count = len(re.findall(r"\$\w+\s*=", rule_text))
+    if string_count < 2:
+        return rule_text
+    # Use "any 2 of them" or "any 3 of them" depending on string count
+    threshold = min(3, max(2, string_count // 3))
+    # Replace condition block
+    new_condition = f"    condition:\n        {threshold} of them"
+    relaxed = re.sub(
+        r"condition:\s*\n[\s\S]*?\n\}",
+        new_condition + "\n}",
+        rule_text,
+    )
+    if relaxed == rule_text:
+        # Fallback: try simpler pattern
+        relaxed = re.sub(
+            r"condition:[\s\S]*$",
+            new_condition + "\n}",
+            rule_text,
+        )
+    return relaxed
 
 
 def _clean_markdown(text: str) -> str:
@@ -700,6 +753,18 @@ def generate_rules(
         logger.info("[rule_gen] Bin dump: %d raw strings → %d after filtering",
                     len(raw_strings), len(filtered))
 
+        # Step 2b: Add slash-format variants of dot-notation class paths
+        # The dump contains BOTH formats: dots in AndroidManifest.xml, slashes in smali.
+        # Ensure both exist so the ranker can match against evidence items (which use dots).
+        slash_extras = []
+        for s in filtered:
+            # Convert com.pkg.ClassName → com/pkg/ClassName for smali matching
+            if re.match(r"[a-z]+\.[a-z]+\.\w+", s) and "/" not in s:
+                slash_form = s.replace(".", "/")
+                if slash_form not in filtered:
+                    slash_extras.append(slash_form)
+        filtered.extend(slash_extras)
+
         # Step 3: Rank using analysis context
         ranked = _rank_dump_strings(filtered, apk_facts, evidence_items, verdict)
         logger.info("[rule_gen] Ranked: %d strings with score > 0. Top: %s",
@@ -739,10 +804,23 @@ def generate_rules(
                     path = _save_rule(_YARA_DIR, fname, yara_text)
                     output["yara_rule_path"] = path
                     logger.info("[rule_gen] ✓ YARA saved: %s", path)
-                elif validation["compiles"]:
-                    logger.warning(
-                        "[rule_gen] ✗ YARA compiles but does NOT match source sample — NOT saved"
-                    )
+                elif validation["compiles"] and not validation["self_matches"]:
+                    # Retry: relax condition to "any 3 of them"
+                    logger.warning("[rule_gen] Self-match failed — attempting relaxed condition")
+                    relaxed = _relax_yara_condition(yara_text)
+                    if relaxed != yara_text:
+                        val2 = _validate_yara(relaxed, bin_file, logger)
+                        if val2["compiles"] and val2["self_matches"]:
+                            output["yara_rule"] = relaxed
+                            output["yara_validation"] = val2
+                            fname = f"Android_{category}_{family}_{sha_short}_{date_tag}.yara"
+                            path = _save_rule(_YARA_DIR, fname, relaxed)
+                            output["yara_rule_path"] = path
+                            logger.info("[rule_gen] ✓ YARA saved (relaxed condition): %s", path)
+                        else:
+                            logger.warning("[rule_gen] ✗ Relaxed condition also failed — NOT saved")
+                    else:
+                        logger.warning("[rule_gen] ✗ Could not relax condition — NOT saved")
                 else:
                     logger.warning("[rule_gen] ✗ YARA compile error: %s", validation["error"])
             except Exception as exc:
