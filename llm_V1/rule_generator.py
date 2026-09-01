@@ -419,6 +419,31 @@ def _build_yara_prompt(
         user_msg += "MALICIOUS BEHAVIORS:\n" + "\n".join(cluster_lines) + "\n\n"
 
     user_msg += "VERIFIED STRINGS FROM THE DUMP (guaranteed to match):\n"
+    user_msg += "\n".join(str_lines) + "\n\n"
+
+    if component_lines:
+        user_msg += "MANIFEST COMPONENTS:\n" + "\n".join(component_lines[:15]) + "\n\n"
+
+    if source_blocks:
+        user_msg += "DECOMPILED SOURCE (top suspicious classes):\n"
+        user_msg += "\n".join(source_blocks) + "\n\n"
+
+    if example_rules:
+        user_msg += "EXAMPLE RULES (same category, for reference):\n"
+        user_msg += example_rules[:3000] + "\n\n"
+
+    user_msg += f"Write the YARA rule. Name: Android_<Category>_{family}_Pipeline_<date>\n"
+
+    # Safety: cap total prompt size to avoid API rejections
+    total = len(system_msg) + len(user_msg)
+    if total > 28000:
+        # Trim source blocks first, then examples
+        user_msg = user_msg[:28000 - len(system_msg)]
+
+    return [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": user_msg},
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +722,8 @@ def generate_rules(
 
             # Step 6: Call LLM
             logger.info("[rule_gen] LLM YARA generation (model=%s)", RULE_GEN_MODEL)
+            prompt_size = sum(len(m.get("content", "")) for m in yara_msgs)
+            logger.info("[rule_gen] Prompt size: %d chars (%d messages)", prompt_size, len(yara_msgs))
             try:
                 raw = call_llm(yara_msgs, RULE_GEN_MODEL, logger, llm_client)
                 yara_text = _clean_markdown(_extract_raw_text(raw))
