@@ -127,22 +127,41 @@ def rank_strings(parsed,apk_facts,evidence_items,verdict):
     return ranked
 
 _vtc,_vtl={},False
+def _vt_query(query,key):
+    """Run a single VT Intelligence Search query. Returns hit count or -1."""
+    try:
+        import requests as _rq
+        r=_rq.get(_VSU,params={"query":query,"limit":1,"descriptors_only":"true"},
+                  headers={"x-apikey":key,"Accept":"application/json"},timeout=15)
+        if r.status_code==429 or not r.ok: return -1
+        d=r.json(); c=len(d.get("data",[]))+(100 if d.get("links",{}).get("next") else 0)
+        _time.sleep(0.5)
+        return c
+    except: return -1
+
 def _vt_search(s,key,log):
+    """Search VT for total hits and malicious hits. Returns (total, malicious) or (-1,-1)."""
     global _vtc,_vtl
     if not _vtl:
         _vtl=True
         if os.path.isfile(_VCP):
             try: _vtc.update(json.load(open(_VCP)))
             except: pass
-    if s in _vtc: return _vtc[s]
-    try:
-        import requests as _rq
-        r=_rq.get(_VSU,params={"query":f'tag:apk and content:"{s}"',"limit":1,"descriptors_only":"true"},headers={"x-apikey":key,"Accept":"application/json"},timeout=15)
-        if r.status_code==429 or not r.ok: return -1
-        d=r.json(); c=len(d.get("data",[]))+(100 if d.get("links",{}).get("next") else 0)
-        _vtc[s]=c; os.makedirs(os.path.dirname(_VCP),exist_ok=True); json.dump(_vtc,open(_VCP,"w"),indent=2); _time.sleep(0.5)
-        return c
-    except: return -1
+    cache_key=s
+    if cache_key in _vtc:
+        v=_vtc[cache_key]
+        if isinstance(v,list): return tuple(v)
+        return (v, -1)  # old cache format: just total
+    total=_vt_query(f'tag:apk and content:"{s}"',key)
+    if total<0: return (-1,-1)
+    mal=-1
+    if total>30:
+        # Check how many of those hits are malicious
+        mal=_vt_query(f'tag:apk and content:"{s}" and p:5+',key)
+    _vtc[cache_key]=[total,mal]
+    os.makedirs(os.path.dirname(_VCP),exist_ok=True)
+    json.dump(_vtc,open(_VCP,"w"),indent=2)
+    return (total,mal)
 
 def vt_validate(ranked,vt_key,log):
     if not vt_key: log.info("[vt] No key-skip"); return ranked
@@ -152,14 +171,33 @@ def vt_validate(ranked,vt_key,log):
         v=s["value"]
         if s["score"]<2.0 or len(v)<10 or s["type"]!="dex_string": continue
         if re.match(r"https?://|^L[a-z]",v): continue
-        h=_vt_search(v,vt_key,log); s["vt_hits"]=h
-        if h<0: continue
+        total,mal=_vt_search(v,vt_key,log)
+        s["vt_hits"]=total; s["vt_mal"]=mal
+        if total<0: continue
         ck+=1
-        if h==0: s["score"]+=2.0; s["reason"]+=" +VT:unique"
-        elif h<=5: s["score"]+=1.0; s["reason"]+=f" +VT:rare({h})"
-        elif h<=30: s["reason"]+=f" VT:{h}"
-        else: s["score"]=0; s["reason"]+=f" -VT:DROP({h})"
-        log.info("[vt] '%s'->%d",v[:50],h)
+        if total==0:
+            s["score"]+=2.0; s["reason"]+=" +VT:unique(0)"
+        elif total<=5:
+            s["score"]+=1.0; s["reason"]+=f" +VT:rare({total})"
+        elif total<=30:
+            s["reason"]+=f" VT:{total}"
+        else:
+            # High hit count — check malicious ratio
+            if mal>=0 and total>0:
+                ratio=mal/total
+                if ratio>=0.7:
+                    # 70%+ of hits are malicious — this is a family signature!
+                    s["score"]+=1.5; s["reason"]+=f" +VT:family({mal}/{total}={ratio:.0%})"
+                elif ratio>=0.3:
+                    # Mixed — neutral, don't boost or penalize
+                    s["reason"]+=f" VT:mixed({mal}/{total}={ratio:.0%})"
+                else:
+                    # Mostly benign — drop
+                    s["score"]=0; s["reason"]+=f" -VT:benign({mal}/{total}={ratio:.0%})"
+            else:
+                # Couldn't get malicious count — penalize but don't drop
+                s["score"]-=1.0; s["reason"]+=f" -VT:common({total})"
+        log.info("[vt] '%s' total=%d mal=%d",v[:50],total,mal)
     ranked=[s for s in ranked if s["score"]>0]; ranked.sort(key=lambda x:-x["score"])
     log.info("[vt] Checked %d. %d remain.",ck,len(ranked)); return ranked
 
