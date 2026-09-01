@@ -420,7 +420,7 @@ def generate_rules(apk_path,apk_facts,evidence_items,clusters,assessments,verdic
                 logger.info("[rule_gen] Phase 1: LLM string selection (%d candidates)",min(50,len(ranked)))
                 sel_msgs=build_select_prompt(ranked,apk_facts,verdict,fam)
                 sel_raw=call_llm(sel_msgs,MODEL,logger,llm_client)
-                sel_text=_raw_text(sel_raw)
+                sel_text=_strip_md(_raw_text(sel_raw))
                 try:
                     selected=json.loads(sel_text) if isinstance(sel_text,str) else sel_text
                     if isinstance(selected,dict): selected=selected.get("selected",selected.get("strings",list(selected.values())[0] if selected else []))
