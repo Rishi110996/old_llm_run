@@ -302,6 +302,13 @@ def vt_validate(ranked: List[Dict], vt_key: Optional[str], log: logging.Logger) 
         if hits == 0: s["score"] += 2.0; s["reason"] += " +VT:unique"
         elif hits <= 5: s["score"] += 1.0; s["reason"] += f" +VT:rare({hits})"
         elif hits <= 30: s["reason"] += f" VT:{hits}"
+        else: s["score"] = 0; s["reason"] += f" -VT:DROP({hits})"
+        log.info("[vt] '%s' -> %d APK hits", val[:50], hits)
+    ranked = [s for s in ranked if s["score"] > 0]
+    ranked.sort(key=lambda x: -x["score"])
+    log.info("[vt] Checked %d. %d remain.", checked, len(ranked))
+    return ranked
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 4: Example rules + YARA prompt builder
