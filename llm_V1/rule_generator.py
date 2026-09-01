@@ -170,8 +170,28 @@ def _vt_search(s,key,log):
     json.dump(_vtc,open(_VCP,"w"),indent=2)
     return (total,mal)
 
-def vt_validate(ranked,vt_key,log):
-    if not vt_key: log.info("[vt] No key-skip"); return ranked
+def vt_annotate(strings,vt_key,log):
+    if not vt_key: log.info("[vt] No key-skip"); return strings
+    ck=0
+    for s in strings:
+        if ck>=MAX_VT: break
+        v=s.get("value","")
+        if len(v)<10: continue
+        if re.match(r"https?://|^L[a-z]",v): continue
+        total,mal=_vt_search(v,vt_key,log)
+        s["vt_total"]=total; s["vt_mal"]=mal
+        if total<0: continue
+        ck+=1
+        if total==0: s["vt_verdict"]="unique - not seen in any APK"
+        elif total<=5: s["vt_verdict"]=f"rare - only {total} APKs"
+        elif mal>=0 and total>0:
+            ratio=mal/total
+            if ratio>=0.7: s["vt_verdict"]=f"family sig - {mal}/{total} ({ratio:.0%}) malicious"
+            elif ratio>=0.3: s["vt_verdict"]=f"mixed - {mal}/{total} ({ratio:.0%}) malicious"
+            else: s["vt_verdict"]=f"mostly benign - {mal}/{total} ({ratio:.0%}) malicious"
+        else: s["vt_verdict"]=f"{total} APKs (mal ratio unknown)"
+        log.info("[vt] '%s' total=%d mal=%d",v[:50],total,mal)
+    log.info("[vt] Annotated %d.",ck); return strings
     ck=0
     for s in ranked:
         if ck>=MAX_VT: break
@@ -217,38 +237,54 @@ def _get_ex(cat):
     if not ms: ms=re.findall(r"(rule\s+Android_\w+\s*:\s*knownmalware\s*\{[\s\S]*?\n\})",c)
     return "\n\n".join(m.strip() for m in ms[:2] if len(m)<3000)
 
-def build_prompt(ranked,facts,asmt,verdict,examples,fam,sha):
-    dex=[r for r in ranked if r["type"]=="dex_string"][:15]
-    comp=[r for r in ranked if r["type"]=="manifest_component"][:5]
-    ast=[r for r in ranked if r["type"]=="asset_path"][:3]
-    dl=[]
-    for r in dex:
-        vt=f" VT={r['vt_hits']}" if r.get("vt_hits",-1)>=0 else ""
-        dl.append(f'  [{r["score"]:.1f}{vt}] "{r["value"]}"  ({r["reason"]})')
-    cl=[f'  {r["value"]}  ({r["reason"]})' for r in comp]
-    al=[f'  {r["value"]}  ({r["reason"]})' for r in ast]
+def build_select_prompt(ranked,facts,verdict,fam):
+    """Phase 1: LLM picks best 15-20 YARA candidates from top 50."""
+    top50=ranked[:50]
+    lines=[]
+    for i,r in enumerate(top50,1):
+        lines.append(f'  {i}. "{r["value"]}"  (score={r["score"]:.1f}, {r["reason"]}, type={r["type"]})')
     sb=[]
     if facts.classes and facts.class_api_scores:
         for cn,sc in sorted(facts.class_api_scores.items(),key=lambda x:-x[1])[:2]:
-            src=facts.classes.get(cn,"")
-            if src: sb.append(f"--- {cn} (score={sc:.2f}) ---\n{src[:2000]}")
+            s=facts.classes.get(cn,"")
+            if s: sb.append(f"--- {cn} (score={sc:.2f}) ---\n{s[:1500]}")
+    sy=("You are an expert Android malware analyst selecting strings for a YARA rule.\n\n"
+        "Select the 15-20 BEST strings for YARA detection from the candidates below.\n\n"
+        "GOOD: bot commands, C2 paths, unique service names, log messages, encoded tokens, method names.\n"
+        "BAD: SDK refs (Jiguang, GreenDAO, Bolts, Lottie, ARouter), generic Android APIs, random package names.\n\n"
+        "Return a JSON array. Each entry: "
+        '{"value":"the string","category":"cmd|c2|bot|sms|asset|log","reason":"why good"}\n'
+        "Return ONLY the JSON array.")
+    us=f"SAMPLE: {fam} | Risk={verdict.get('Risk-Score',0)}\n"
+    us+=f"Package: {facts.basic_info.get('package_name','?')}\n"
+    us+=f"Summary: {verdict.get('Summary','')[:300]}\n\n"
+    us+="CANDIDATES:\n"+chr(10).join(lines)+"\n"
+    if sb: us+="\nSOURCE CODE:\n"+"\n".join(sb)+"\n"
+    if len(sy)+len(us)>25000: us=us[:25000-len(sy)]
+    return [{"role":"system","content":sy},{"role":"user","content":us}]
+
+def build_rule_prompt(selected,facts,asmt,verdict,examples,fam,sha):
+    """Phase 3: LLM writes YARA using selected strings + VT intel."""
+    lines=[]
+    for s in selected:
+        vt=""
+        if s.get("vt_verdict"): vt=f" [VT: {s['vt_verdict']}]"
+        lines.append(f'  "{s.get("value","?")}"  (category={s.get("category","?")}, reason={s.get("reason","?")}){vt}')
     mc=[f"  {f}: {a.verdict} ({a.confidence:.2f})" for f,a in sorted(asmt.items(),key=lambda x:-x[1].confidence) if a.verdict=="malicious"]
     sy=("You are an expert YARA rule author for Android malware.\n\n"
-        "TARGET: APK dump .bin files with decoded AndroidManifest.xml and RAW DEX binary. "
-        "String constants from code appear as plain ASCII in the DEX.\n\n"
-        "GOOD STRINGS: bot commands, C2 paths, log messages, unique service names, AMStrings.\n"
-        "BAD STRINGS: SDK refs (Jiguang,Bolts,Lottie), random package names, generic permissions.\n\n"
-        "Use ONLY the VERIFIED strings I provide. Categorize: $cmd_*,$c2_*,$bot_*. Flexible conditions.\n"
-        "Include meta: threatname, category, risk=127, date, author=pipeline-auto.\n"
-        "Return ONLY the YARA rule. No markdown, no explanation.\n")
+        "TARGET: APK dump .bin files with decoded AndroidManifest.xml and RAW DEX binary.\n\n"
+        "I provide selected strings with VT Intelligence annotations. "
+        "VT data is ADVISORY - use your expert judgment. A string with many hits but high malicious ratio "
+        "is a family signature. A string with zero VT hits is unique to this sample. "
+        "A string not checked on VT may still be excellent if it looks malicious.\n\n"
+        "Categorize: $cmd_*, $c2_*, $bot_*, $sms_*. Flexible conditions.\n"
+        "meta: threatname, category, risk=127, date, author=pipeline-auto.\n"
+        "Return ONLY the YARA rule. No markdown.\n")
     us=f"SAMPLE: {fam}|SHA={sha[:16]}...|Risk={verdict.get('Risk-Score',0)}\n"
     us+=f"Package: {facts.basic_info.get('package_name','?')}\n"
     us+=f"Summary: {verdict.get('Summary','')[:300]}\n\n"
     if mc: us+="MALICIOUS BEHAVIORS:\n"+"\n".join(mc)+"\n\n"
-    if dl: us+="DEX STRINGS:\n"+"\n".join(dl)+"\n\n"
-    if cl: us+="MANIFEST COMPONENTS:\n"+"\n".join(cl)+"\n\n"
-    if al: us+="SUSPICIOUS ASSETS:\n"+"\n".join(al)+"\n\n"
-    if sb: us+="DECOMPILED SOURCE:\n"+"\n".join(sb)+"\n\n"
+    us+="SELECTED STRINGS + VT INTEL:\n"+"\n".join(lines)+"\n\n"
     if examples: us+="EXAMPLE RULES:\n"+examples[:3000]+"\n\n"
     us+=f"Write the YARA rule. Name: Android_{fam}_Pipeline_<date>\n"
     if len(sy)+len(us)>28000: us=us[:28000-len(sy)]
@@ -377,15 +413,34 @@ def generate_rules(apk_path,apk_facts,evidence_items,clusters,assessments,verdic
         logger.info("[rule_gen] Parsed: %d dex, %d comp, %d assets",len(parsed["dex_strings"]),len(parsed["manifest_components"]),len(parsed["asset_paths"]))
         ranked=rank_strings(parsed,apk_facts,evidence_items,verdict)
         logger.info("[rule_gen] Ranked: %d. Top: %s",len(ranked),f'{ranked[0]["score"]:.1f} "{ranked[0]["value"][:50]}"' if ranked else "none")
-        ranked=vt_validate(ranked,vt_api_key,logger)
         out["ioc_summary"]["ranked_strings"]=len(ranked)
         if len(ranked)>=3:
-            ex=_get_ex(cat)
-            msgs=build_prompt(ranked,apk_facts,assessments,verdict,ex,fam,sha)
-            ps=sum(len(m.get("content","")) for m in msgs)
-            logger.info("[rule_gen] LLM YARA (prompt=%d chars)",ps)
             try:
-                raw=call_llm(msgs,MODEL,logger,llm_client)
+                # Phase 1: LLM selects best candidates from top 50
+                logger.info("[rule_gen] Phase 1: LLM string selection (%d candidates)",min(50,len(ranked)))
+                sel_msgs=build_select_prompt(ranked,apk_facts,verdict,fam)
+                sel_raw=call_llm(sel_msgs,MODEL,logger,llm_client)
+                sel_text=_raw_text(sel_raw)
+                try:
+                    selected=json.loads(sel_text) if isinstance(sel_text,str) else sel_text
+                    if isinstance(selected,dict): selected=selected.get("selected",selected.get("strings",list(selected.values())[0] if selected else []))
+                    if not isinstance(selected,list): selected=[]
+                except: selected=[]
+                logger.info("[rule_gen] Phase 1: LLM selected %d strings",len(selected))
+                if not selected:
+                    logger.warning("[rule_gen] LLM returned no selections, using top 15 ranked")
+                    selected=[{"value":r["value"],"category":"auto","reason":r["reason"]} for r in ranked[:15]]
+                # Phase 2: VT annotate the LLM's picks (advisory only)
+                if vt_api_key and selected:
+                    logger.info("[rule_gen] Phase 2: VT annotation of %d strings",len(selected))
+                    selected=vt_annotate(selected,vt_api_key,logger)
+                # Phase 3: LLM writes YARA with VT intel
+                logger.info("[rule_gen] Phase 3: LLM YARA generation")
+                ex=_get_ex(cat)
+                rule_msgs=build_rule_prompt(selected,apk_facts,assessments,verdict,ex,fam,sha)
+                ps=sum(len(m.get("content","")) for m in rule_msgs)
+                logger.info("[rule_gen] Phase 3 prompt=%d chars",ps)
+                raw=call_llm(rule_msgs,MODEL,logger,llm_client)
                 yara=_strip_md(_raw_text(raw)); out["yara_rule"]=yara
                 val=_validate(yara,bf,logger); out["yara_validation"]=val
                 if val["compiles"] and val["self_matches"]:
