@@ -141,6 +141,20 @@ def parse_bin_dump(bin_path: str) -> Dict[str, List[str]]:
         # Skip XML tags
         if s.startswith("<") or s.startswith("<?"):
             continue
+        # Skip pure hex/base64/numeric
+        if re.match(r"^(?:\d+$|0x[0-9a-f]+$|[A-Za-z0-9+/]{80,}={0,2}$|[0-9a-f]{32,}$)", s, re.I):
+            continue
+        seen.add(s)
+        dex_strings.append(s)
+
+    return {
+        "manifest_components": manifest_components,
+        "manifest_permissions": manifest_permissions,
+        "dex_strings": dex_strings,
+        "asset_paths": asset_paths,
+        "all_filenames": all_filenames,
+    }
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SECTION 2: Rank strings using analysis context
