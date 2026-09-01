@@ -135,12 +135,14 @@ def _vt_query(query,key):
     """Run a single VT Intelligence Search query. Returns hit count or -1."""
     try:
         import requests as _rq
-        r=_rq.get(_VSU,params={"query":query,"limit":1,"descriptors_only":"true"},
-                  headers={"x-apikey":key,"Accept":"application/json"},timeout=15)
+        r=_rq.get(_VSU,params={"query":query,"limit":300,"descriptors_only":"true"},
+                  headers={"x-apikey":key,"Accept":"application/json"},timeout=20)
         if r.status_code==429 or not r.ok: return -1
-        d=r.json(); c=len(d.get("data",[]))+(100 if d.get("links",{}).get("next") else 0)
+        d=r.json()
+        count=len(d.get("data",[]))
+        if d.get("links",{}).get("next"): count+=300  # many more pages exist
         _time.sleep(0.5)
-        return c
+        return count
     except: return -1
 
 def _vt_search(s,key,log):
