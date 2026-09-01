@@ -307,6 +307,32 @@ def _raw_text(resp):
         return str(resp)
     return str(resp)
 
+def _parse_llm_list(resp,log):
+    """Parse call_llm response into a list, handling all wrapper formats."""
+    # Direct list (call_llm parsed JSON array successfully)
+    if isinstance(resp,list): return resp
+    # Dict wrapper from call_llm fallback
+    if isinstance(resp,dict):
+        for k in ("summary","selected","strings","relevant"):
+            v=resp.get(k)
+            if isinstance(v,list): return v
+            if isinstance(v,str):
+                v=v.strip()
+                if v.startswith("```"): v="\n".join(l for l in v.split("\n") if not l.strip().startswith("```")).strip()
+                if v.startswith("["):
+                    try: return json.loads(v)
+                    except: pass
+        return []
+    # Raw string
+    if isinstance(resp,str):
+        t=resp.strip()
+        if t.startswith("```"): t="\n".join(l for l in t.split("\n") if not l.strip().startswith("```")).strip()
+        if t.startswith("["):
+            try: return json.loads(t)
+            except Exception as e: log.warning("[parse_list] JSON error: %s",e)
+        return []
+    return []
+
 def _strip_md(t):
     t=t.strip()
     if t.startswith("```"): t="\n".join(l for l in t.split("\n") if not l.strip().startswith("```")).strip()
@@ -420,26 +446,7 @@ def generate_rules(apk_path,apk_facts,evidence_items,clusters,assessments,verdic
                 logger.info("[rule_gen] Phase 1: LLM string selection (%d candidates)",min(50,len(ranked)))
                 sel_msgs=build_select_prompt(ranked,apk_facts,verdict,fam)
                 sel_raw=call_llm(sel_msgs,MODEL,logger,llm_client)
-                sel_text=_strip_md(_raw_text(sel_raw))
-                logger.info("[rule_gen] Phase 1 raw type=%s len=%d first50='%s'",type(sel_text).__name__,len(sel_text) if isinstance(sel_text,str) else 0,str(sel_text)[:50])
-                try:
-                    selected=json.loads(sel_text) if isinstance(sel_text,str) else sel_text
-                    if isinstance(selected,dict):
-                        # LLM might return {"summary":"[{...}]"} from call_llm wrapper
-                        for k in ("summary","selected","strings"):
-                            v=selected.get(k)
-                            if isinstance(v,str) and v.strip().startswith("["):
-                                selected=json.loads(v.strip())
-                                break
-                            elif isinstance(v,list):
-                                selected=v
-                                break
-                        else:
-                            selected=[]
-                    if not isinstance(selected,list): selected=[]
-                except Exception as parse_err:
-                    logger.warning("[rule_gen] Phase 1 JSON parse error: %s",parse_err)
-                    selected=[]
+                selected=_parse_llm_list(sel_raw,logger)
                 logger.info("[rule_gen] Phase 1: LLM selected %d strings",len(selected))
                 if not selected:
                     logger.warning("[rule_gen] LLM returned no selections, using top 15 ranked")
