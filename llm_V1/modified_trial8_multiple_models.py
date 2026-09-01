@@ -660,6 +660,34 @@ def _is_key_exhaustion_error(exc: Exception) -> bool:
     return any(m in msg for m in markers)
 
 
+def preflight_check_keys(key_configs: List[LLMKeyConfig]) -> List[LLMKeyConfig]:
+    """
+    Send a tiny test request to each key before launching runners.
+    Returns only the keys that respond successfully.
+    """
+    healthy: List[LLMKeyConfig] = []
+    for kc in key_configs:
+        client = create_llm_client(kc)
+        try:
+            resp = client.chat.completions.create(
+                model="claude-sonnet-4-6",
+                messages=[{"role": "user", "content": "reply with OK"}],
+                max_tokens=5,
+                temperature=0,
+                stream=False,
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            print(f"[preflight] key={kc.name}: OK ({content[:20]})")
+            healthy.append(kc)
+        except Exception as exc:
+            if _is_key_exhaustion_error(exc):
+                print(f"[preflight] key={kc.name}: DEAD (budget/auth: {str(exc)[:100]})")
+            else:
+                print(f"[preflight] key={kc.name}: ERROR ({str(exc)[:100]}) — keeping anyway")
+                healthy.append(kc)  # transient error, keep the key
+    return healthy
+
+
 def init_fallback_pool(key_configs: List[LLMKeyConfig]) -> None:
     """Initialize the fallback pool with all available keys."""
     global _fallback_clients, _dead_keys
@@ -2233,6 +2261,20 @@ if __name__ == "__main__":
         f"[startup] loaded {len(key_configs)} LLM key(s): "
         f"{', '.join(key.name for key in key_configs)}"
     )
+
+    # Pre-flight health check: test each key with a tiny request
+    if not args.worker_mode:
+        print("[startup] running pre-flight key health check...")
+        key_configs = preflight_check_keys(key_configs)
+        if not key_configs:
+            raise SystemExit(
+                "[startup] ALL LLM keys failed pre-flight check. "
+                "No healthy keys available. Check budget/auth."
+            )
+        print(
+            f"[startup] {len(key_configs)} healthy key(s): "
+            f"{', '.join(key.name for key in key_configs)}"
+        )
 
     if not args.worker_mode and len(key_config_summary.get("active_names") or []) == 1:
         active_name = (key_config_summary.get("active_names") or ["runner-1"])[0]
