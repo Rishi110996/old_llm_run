@@ -19,7 +19,10 @@ _SDK=re.compile(
     r"|Lcom/fasterxml/|Lcom/facebook/|Lorg/apache/|Lorg/json/"
     r"|Lcn/jpush/|Lcn/jiguang/|Lcom/alibaba/|Lcom/tencent/"
     r"|Lcom/baidu/|Lcom/huawei/|Lcom/umeng/"
-    r"|Lbolts/|Lcom/crashlytics/|Lcom/airbnb/|Lcom/github/)")
+    r"|Lbolts/|Lcom/crashlytics/|Lcom/airbnb/|Lcom/github/"
+    r"|Lorg/greenrobot/|Lcom/bumptech/|Lio/reactivex/"
+    r"|Lcom/journeyapps/|Lme/zhanghai/|Lcom/scwang/"
+    r"|Lcom/gyf/|Lcom/youth/|Lcom/lzy/|Lcom/zhy/)")
 
 _GEN={
     "true","false","null","name","value","type","class","field","method",
@@ -30,6 +33,7 @@ _GEN={
     "listener","context","content","bundle","manager","system","process",
     "runtime","message","request","response","connection","accessibility",
     "notification","broadcast","callback","interface","implements","override",
+    "greenrobot","greendao","eventbus","reactivex","rxjava","glide",
 }
 
 def _ascii(data, n=8):
@@ -150,8 +154,9 @@ def _vt_search(s,key,log):
     cache_key=s
     if cache_key in _vtc:
         v=_vtc[cache_key]
-        if isinstance(v,list): return tuple(v)
-        return (v, -1)  # old cache format: just total
+        if isinstance(v,list) and len(v)==2: return tuple(v)
+        # Old cache format (single int) — ignore, re-query with 2-query logic
+        pass
     total=_vt_query(f'tag:apk and content:"{s}"',key)
     if total<0: return (-1,-1)
     mal=-1
