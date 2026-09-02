@@ -237,28 +237,61 @@ def _get_ex(cat):
     if not ms: ms=re.findall(r"(rule\s+Android_\w+\s*:\s*knownmalware\s*\{[\s\S]*?\n\})",c)
     return "\n\n".join(m.strip() for m in ms[:2] if len(m)<3000)
 
-def build_select_prompt(ranked,facts,verdict,fam):
-    """Phase 1: LLM picks best 15-20 YARA candidates from top 50."""
+def build_select_prompt(ranked,facts,verdict,fam,assessments=None):
+    """Phase 1: LLM picks best 15-20 YARA candidates."""
     top50=ranked[:50]
     lines=[]
     for i,r in enumerate(top50,1):
         lines.append(f'  {i}. "{r["value"]}"  (score={r["score"]:.1f}, {r["reason"]}, type={r["type"]})')
+    # Verdict IOCs — confirmed malicious by analysis
+    ioc_lines=[]
+    for ioc in (verdict.get("IOCs") or [])[:15]:
+        ioc_lines.append(f"  - {ioc}")
+    # Manifest components from androguard (not from bin dump)
+    comp_lines=[]
+    for ct in ("services","receivers"):
+        comps=facts.components.get(ct,{})
+        if isinstance(comps,dict):
+            for name in list(comps.keys())[:10]:
+                comp_lines.append(f"  [{ct[:-1]}] {name}")
+    # Malicious cluster verdicts
+    mal_lines=[]
+    if assessments:
+        for f2,a in sorted(assessments.items(),key=lambda x:-x[1].confidence):
+            if a.verdict=="malicious":
+                mal_lines.append(f"  {f2}: malicious ({a.confidence:.2f})")
+    # Source code
     sb=[]
     if facts.classes and facts.class_api_scores:
         for cn,sc in sorted(facts.class_api_scores.items(),key=lambda x:-x[1])[:2]:
             s=facts.classes.get(cn,"")
-            if s: sb.append(f"--- {cn} (score={sc:.2f}) ---\n{s[:1500]}")
-    sy=("You are an expert Android malware analyst selecting strings for a YARA rule.\n\n"
-        "Select the 15-20 BEST strings for YARA detection from the candidates below.\n\n"
-        "GOOD: bot commands, C2 paths, unique service names, log messages, encoded tokens, method names.\n"
-        "BAD: SDK refs (Jiguang, GreenDAO, Bolts, Lottie, ARouter), generic Android APIs, random package names.\n\n"
-        "Return a JSON array. Each entry: "
-        '{"value":"the string","category":"cmd|c2|bot|sms|asset|log","reason":"why good"}\n'
-        "Return ONLY the JSON array.")
+            if s: sb.append(f"--- {cn} (score={sc:.2f}) ---\n{s[:1200]}")
+    sy=("You are an expert Android malware analyst selecting strings for a YARA detection rule.\n\n"
+        "I provide: (1) candidate strings from the APK dump, (2) IOCs confirmed malicious by analysis, "
+        "(3) manifest components, (4) malicious behavior clusters.\n\n"
+        "Select 15-20 BEST strings. PRIORITIZE:\n"
+        "- Strings related to the confirmed IOCs (bot services, SMS receivers, accessibility abuse)\n"
+        "- Strings from bot infrastructure paths (bot/components/injects, bot/sms)\n"
+        "- Unique method/class names specific to this malware, NOT generic SDK methods\n"
+        "- C2 paths, encoded tokens, unique error messages\n\n"
+        "AVOID: SDK strings (Jiguang, GreenDAO, Bolts, Lottie, ARouter), "
+        "generic dependency injection methods (autoInject, doInject etc from DI frameworks), "
+        "generic Android APIs, random package names, strings from legitimate embedded apps.\n\n"
+        "IMPORTANT: strings like 'autoInject', 'doInject', 'getInjectConfig' are COMMON in "
+        "dependency injection frameworks (Dagger, Spring, ARouter) — NOT malware-specific. "
+        "Prefer bot-specific names like 'InjAccessibilityService', 'SmsReceiver', 'Socks5ProxyService'.\n\n"
+        "Return JSON array: "
+        '{"value":"string","category":"cmd|c2|bot|sms|asset|log","reason":"why"}\n')
     us=f"SAMPLE: {fam} | Risk={verdict.get('Risk-Score',0)}\n"
     us+=f"Package: {facts.basic_info.get('package_name','?')}\n"
-    us+=f"Summary: {verdict.get('Summary','')[:300]}\n\n"
-    us+="CANDIDATES:\n"+chr(10).join(lines)+"\n"
+    us+=f"Summary: {verdict.get('Summary','')[:250]}\n\n"
+    if ioc_lines:
+        us+="CONFIRMED IOCs (from analysis):\n"+"\n".join(ioc_lines)+"\n\n"
+    if mal_lines:
+        us+="MALICIOUS BEHAVIORS:\n"+"\n".join(mal_lines)+"\n\n"
+    if comp_lines:
+        us+="MANIFEST COMPONENTS:\n"+"\n".join(comp_lines[:15])+"\n\n"
+    us+="CANDIDATE STRINGS FROM DUMP:\n"+chr(10).join(lines)+"\n"
     if sb: us+="\nSOURCE CODE:\n"+"\n".join(sb)+"\n"
     if len(sy)+len(us)>25000: us=us[:25000-len(sy)]
     return [{"role":"system","content":sy},{"role":"user","content":us}]
@@ -444,7 +477,7 @@ def generate_rules(apk_path,apk_facts,evidence_items,clusters,assessments,verdic
             try:
                 # Phase 1: LLM selects best candidates from top 50
                 logger.info("[rule_gen] Phase 1: LLM string selection (%d candidates)",min(50,len(ranked)))
-                sel_msgs=build_select_prompt(ranked,apk_facts,verdict,fam)
+                sel_msgs=build_select_prompt(ranked,apk_facts,verdict,fam,assessments)
                 sel_raw=call_llm(sel_msgs,MODEL,logger,llm_client)
                 selected=_parse_llm_list(sel_raw,logger)
                 logger.info("[rule_gen] Phase 1: LLM selected %d strings",len(selected))
