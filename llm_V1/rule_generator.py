@@ -243,10 +243,14 @@ def build_select_prompt(ranked,facts,verdict,fam,assessments=None):
     lines=[]
     for i,r in enumerate(top50,1):
         lines.append(f'  {i}. "{r["value"]}"  (score={r["score"]:.1f}, {r["reason"]}, type={r["type"]})')
-    # Verdict IOCs — confirmed malicious by analysis
+    # Verdict IOCs — strip randomized package prefix for family-level matching
+    pkg=facts.basic_info.get("package_name","")
     ioc_lines=[]
     for ioc in (verdict.get("IOCs") or [])[:15]:
-        ioc_lines.append(f"  - {ioc}")
+        clean=ioc
+        if pkg and clean.startswith(pkg+"."):
+            clean=clean[len(pkg)+1:]  # strip com.pmmynubv.nommztx. prefix
+        ioc_lines.append(f"  - {clean}")
     # Manifest components from androguard (not from bin dump)
     comp_lines=[]
     for ct in ("services","receivers"):
@@ -280,6 +284,10 @@ def build_select_prompt(ranked,facts,verdict,fam,assessments=None):
         "IMPORTANT: strings like 'autoInject', 'doInject', 'getInjectConfig' are COMMON in "
         "dependency injection frameworks (Dagger, Spring, ARouter) — NOT malware-specific. "
         "Prefer bot-specific names like 'InjAccessibilityService', 'SmsReceiver', 'Socks5ProxyService'.\n\n"
+        "CRITICAL: Do NOT use the full package-qualified name (e.g. com.pmmynubv.nommztx.bot.sms.SmsReceiver). "
+        "The package name is randomized per variant. Use the SUFFIX without the package prefix "
+        "(e.g. 'bot.sms.SmsReceiver' or 'bot/sms/SmsReceiver' or just 'SmsReceiver'). "
+        "This ensures the rule detects ALL variants of the family, not just one sample.\n\n"
         "Return JSON array: "
         '{"value":"string","category":"cmd|c2|bot|sms|asset|log","reason":"why"}\n')
     us=f"SAMPLE: {fam} | Risk={verdict.get('Risk-Score',0)}\n"
@@ -311,6 +319,9 @@ def build_rule_prompt(selected,facts,asmt,verdict,examples,fam,sha):
         "is a family signature. A string with zero VT hits is unique to this sample. "
         "A string not checked on VT may still be excellent if it looks malicious.\n\n"
         "Categorize: $cmd_*, $c2_*, $bot_*, $sms_*. Flexible conditions.\n"
+        "CRITICAL: Do NOT use full package-qualified strings (com.xxxxx.yyyyy.bot.sms/SmsReceiver). "
+        "The package prefix is randomized per variant. Use the path SUFFIX only "
+        "(e.g. 'bot.sms.SmsReceiver' or 'bot/sms/SmsReceiver' or 'InjAccessibilityService').\n"
         "meta: threatname, category, risk=127, date, author=pipeline-auto.\n"
         "Return ONLY the YARA rule. No markdown.\n")
     us=f"SAMPLE: {fam}|SHA={sha[:16]}...|Risk={verdict.get('Risk-Score',0)}\n"
