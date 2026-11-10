@@ -456,6 +456,7 @@ def run(
     vt_api_key: Optional[str] = None,
     no_vt_detection: bool = False,
     generate_rules_flag: bool = False,
+    runner_id: str = "",
 ) -> Dict[str, Any]:
     """
     Run the v2 pipeline.  Returns a verdict dict matching the v1 schema:
@@ -630,6 +631,7 @@ def run(
                 logger=logger,
                 llm_client=llm_client,
                 vt_api_key=vt_api_key,
+                runner_id=runner_id,
             )
             normalized["generated_rules"] = rule_output
         except Exception as exc:

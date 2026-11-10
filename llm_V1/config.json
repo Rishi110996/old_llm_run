@@ -1,0 +1,28 @@
+{
+  "base_url_zllama": "http://10.207.1.197:8090/v1",
+  "api_key_zllama": "local-test",
+  "llm_runner_name": "local-test",
+
+  "yara_refinement": {
+    "enabled": true,
+    "max_refinement_rounds": 3,
+    "max_concurrent_retrohunt_jobs_per_key": 3,
+    "retrohunt_corpus": "main",
+    "goodware_prescreen": true,
+    "retrohunt_time_range_days": 90,
+    "poll_interval_sec": 120,
+    "poll_timeout_sec": 14400,
+    "max_acceptable_clean_fps": 0,
+    "max_acceptable_suspicious_fps": 5,
+    "fp_sample_download_count": 5
+  },
+
+  "snort_cif_validation": {
+    "enabled": true,
+    "validate_domains_via_vt": true,
+    "validate_ips_via_vt": true,
+    "min_domain_detections_to_keep": 1,
+    "drop_cdn_cloud_ips": true,
+    "adjust_cif_confidence_from_vt": true
+  }
+}

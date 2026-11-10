@@ -466,7 +466,92 @@ def _cif(ev,fam,sha):
                 entries.append({"indicator":d,"itype":"fqdn","tags":tags,"confidence":8,"provider":"apk-pipeline","sha256":sha,"first_seen":today,"last_seen":today})
     return entries
 
-def generate_rules(apk_path,apk_facts,evidence_items,clusters,assessments,verdict,yara_matches,logger,llm_client,vt_api_key=None):
+def _register_in_db(rule_name,family,category,sha256_src,rule_text,file_path,runner_id,logger):
+    """Register a saved YARA rule in the refinement registry (best-effort)."""
+    try:
+        from yara_rule_registry import YaraRuleRegistry
+        reg=YaraRuleRegistry()
+        # Load max rounds from config
+        max_rounds=3
+        try:
+            cfg_path=os.path.join(_SD,"config.json")
+            with open(cfg_path,"r",encoding="utf-8") as f:
+                c=json.load(f)
+            max_rounds=c.get("yara_refinement",{}).get("max_refinement_rounds",3)
+        except Exception: pass
+        rule_id,action=reg.register_rule(
+            rule_name=rule_name,family=family,category=category,
+            sha256_source=sha256_src,rule_text=rule_text,
+            rule_file_path=file_path,runner_id=runner_id,
+            max_refinement_rounds=max_rounds,
+        )
+        reg.close()
+        logger.info("[rule_gen] registry: %s -> %s (id=%s)",rule_name,action,rule_id)
+    except Exception as e:
+        logger.warning("[rule_gen] registry failed: %s",e)
+
+def _validate_snort_iocs(snort_text,vt_api_key,logger):
+    """Validate domains/IPs in Snort rules via VT reputation. Returns pruned text."""
+    if not vt_api_key: return snort_text
+    try:
+        cfg_path=os.path.join(_SD,"config.json")
+        with open(cfg_path,"r",encoding="utf-8") as f:
+            cfg=json.load(f)
+        scfg=cfg.get("snort_cif_validation",{})
+        if not scfg.get("enabled",True): return snort_text
+    except Exception: return snort_text
+    try:
+        from vt_retrohunt import validate_domain_reputation,validate_ip_reputation
+        min_det=scfg.get("min_domain_detections_to_keep",1)
+        # Extract and validate domains
+        domains=set(re.findall(r'\b[\w.-]+\.(?:com|net|org|io|xyz|ru|cn|tk|top)\b',snort_text,re.I))
+        clean_doms=set()
+        for d in list(domains)[:15]:
+            rep=validate_domain_reputation(d,vt_api_key,logger)
+            if rep.get("status")=="ok" and rep.get("malicious",0)<min_det:
+                clean_doms.add(d)
+                logger.info("[rule_gen] snort: dropping clean domain %s (mal=%d)",d,rep.get("malicious",0))
+        if clean_doms:
+            lines=snort_text.splitlines()
+            pruned=[l for l in lines if not any(d in l for d in clean_doms)]
+            if pruned: snort_text="\n".join(pruned)
+    except Exception as e:
+        logger.warning("[rule_gen] snort IOC validation error: %s",e)
+    return snort_text
+
+def _validate_cif_iocs(cif_entries,vt_api_key,logger):
+    """Validate CIF domain entries via VT reputation. Prune clean ones."""
+    if not vt_api_key or not cif_entries: return cif_entries
+    try:
+        cfg_path=os.path.join(_SD,"config.json")
+        with open(cfg_path,"r",encoding="utf-8") as f:
+            cfg=json.load(f)
+        scfg=cfg.get("snort_cif_validation",{})
+        if not scfg.get("enabled",True): return cif_entries
+    except Exception: return cif_entries
+    try:
+        from vt_retrohunt import validate_domain_reputation
+        min_det=scfg.get("min_domain_detections_to_keep",1)
+        adjust_conf=scfg.get("adjust_cif_confidence_from_vt",True)
+        validated=[]
+        for entry in cif_entries:
+            d=entry.get("indicator","")
+            rep=validate_domain_reputation(d,vt_api_key,logger)
+            if rep.get("status")!="ok":
+                validated.append(entry); continue
+            mal=rep.get("malicious",0)
+            if mal<min_det:
+                logger.info("[rule_gen] cif: dropping clean indicator %s (mal=%d)",d,mal)
+                continue
+            if adjust_conf and mal>=5:
+                entry["confidence"]=min(10,entry.get("confidence",8)+1)
+            validated.append(entry)
+        return validated
+    except Exception as e:
+        logger.warning("[rule_gen] cif IOC validation error: %s",e)
+        return cif_entries
+
+def generate_rules(apk_path,apk_facts,evidence_items,clusters,assessments,verdict,yara_matches,logger,llm_client,vt_api_key=None,runner_id=""):
     from modified_trial8_multiple_models import call_llm
     fam=_family(verdict,yara_matches); cat=_category(assessments)
     sha=""
@@ -512,6 +597,7 @@ def generate_rules(apk_path,apk_facts,evidence_items,clusters,assessments,verdic
                     fn=f"Android_{cat}_{fam}_{ss}_{dtag}.yara"
                     out["yara_rule_path"]=_save(_YD,fn,yara)
                     logger.info("[rule_gen] YARA saved: %s",out["yara_rule_path"])
+                    _register_in_db(fn,fam,cat,sha,yara,out["yara_rule_path"],runner_id,logger)
                 elif val["compiles"]:
                     logger.warning("[rule_gen] Self-match fail-relaxing")
                     rx=_relax(yara)
@@ -521,6 +607,7 @@ def generate_rules(apk_path,apk_facts,evidence_items,clusters,assessments,verdic
                             out["yara_rule"]=rx; out["yara_validation"]=v2
                             out["yara_rule_path"]=_save(_YD,f"Android_{cat}_{fam}_{ss}_{dtag}.yara",rx)
                             logger.info("[rule_gen] YARA saved(relaxed): %s",out["yara_rule_path"])
+                            _register_in_db(f"Android_{cat}_{fam}_{ss}_{dtag}.yara",fam,cat,sha,rx,out["yara_rule_path"],runner_id,logger)
                         else: logger.warning("[rule_gen] Relaxed also failed")
                     else: logger.warning("[rule_gen] Could not relax")
                 else: logger.warning("[rule_gen] Compile error: %s",val["error"])
@@ -531,11 +618,17 @@ def generate_rules(apk_path,apk_facts,evidence_items,clusters,assessments,verdic
         logger.info("[rule_gen] LLM Snort")
         try:
             raw=call_llm(sm,MODEL,logger,llm_client); txt=_strip_md(_raw_text(raw))
+            # Validate Snort IOCs via VT reputation before saving
+            if vt_api_key:
+                txt=_validate_snort_iocs(txt,vt_api_key,logger)
             out["snort_rules"]=txt; out["snort_rules_path"]=_save(_ND,f"Android_{fam}_{ss}_{dtag}.rules",txt)
             logger.info("[rule_gen] Snort: %s",out["snort_rules_path"])
         except Exception as e: logger.error("[rule_gen] Snort failed: %s",e)
     cif=_cif(evidence_items,fam,sha)
     if cif:
+        # Validate CIF IOCs via VT reputation before saving
+        if vt_api_key:
+            cif=_validate_cif_iocs(cif,vt_api_key,logger)
         out["cif_entries"]=cif; out["cif_path"]=_save(_CD,f"{dtag}_{fam}_{ss}.json",json.dumps(cif,indent=2))
         logger.info("[rule_gen] CIF: %d->%s",len(cif),out["cif_path"])
     logger.info("[rule_gen] Done: YARA=%s Snort=%s CIF=%d","saved" if out["yara_rule_path"] else ("gen" if out["yara_rule"] else "skip"),"OK" if out["snort_rules"] else "skip",len(cif))

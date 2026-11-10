@@ -1594,7 +1594,7 @@ def final_llm_verdict(
 
 
 # -------------------- PIPELINE --------------------
-def analyze_apk_pipeline(apk_path, logger, llm_client: OpenAI):
+def analyze_apk_pipeline(apk_path, logger, llm_client: OpenAI, runner_id: str = ""):
     """
     Thin wrapper -- delegates to apk_pipeline_v2.run().
     Enrichment flags (use_smba, vt_api_key) are read from module-level globals
@@ -1609,6 +1609,7 @@ def analyze_apk_pipeline(apk_path, logger, llm_client: OpenAI):
         vt_api_key=_VT_API_KEY,
         no_vt_detection=_NO_VT_DETECTION,
         generate_rules_flag=_GENERATE_RULES,
+        runner_id=runner_id,
     )
 
 
@@ -1702,7 +1703,7 @@ def analyze_sample_with_state(
             state_db.finish(sha256=sha256, status="corrupt", last_error=parse_error, runner_id=runner_id)
             return "corrupt"
 
-        verdict = analyze_apk_pipeline(apk_path, logger, llm_client)
+        verdict = analyze_apk_pipeline(apk_path, logger, llm_client, runner_id=runner_id)
         if not isinstance(verdict, dict) or not verdict:
             raise RuntimeError("Analyzer returned no verdict")
 
