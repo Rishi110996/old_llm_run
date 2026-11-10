@@ -170,12 +170,15 @@ def main()->int:
         if not ak:
             for entry in ac.get("llm_api_keys",[]):
                 k=entry.get("api_key") or entry.get("value","")
-                if k:ak=str(k).strip();break
+                if k:ak=str(k).strip();log.info("[ref] LLM key from llm_api_keys: %s",entry.get("name","?"));break
         if bu and ak:
-            from openai import OpenAI
-            llm=OpenAI(base_url=bu,api_key=ak);log.info("[ref] LLM ready (%s)",bu)
-        else:log.warning("[ref] no LLM config")
-    except Exception as e:log.warning("[ref] LLM init: %s",e)
+            try:
+                from openai import OpenAI
+                llm=OpenAI(base_url=bu,api_key=ak);log.info("[ref] LLM ready (%s)",bu)
+            except ImportError:
+                log.warning("[ref] openai not installed. Retrohunt runs but rule tweaking skipped.")
+        else:log.warning("[ref] no LLM config. Retrohunt runs but rule tweaking skipped.")
+    except Exception as e:log.warning("[ref] config load error: %s",e)
     ct=run_refiner(log,rule_id=args.rule_id,llm_client=llm)
     print(json.dumps(ct,indent=2));return 0 if ct.get("error",0)==0 else 1
 
