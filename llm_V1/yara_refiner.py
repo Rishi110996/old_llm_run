@@ -165,7 +165,12 @@ def main()->int:
     llm=None
     try:
         with open(os.path.join(_SD,"config.json"),"r",encoding="utf-8") as f:ac=json.load(f)
-        bu=args.llm_base_url or ac.get("base_url_zllama");ak=args.llm_api_key or ac.get("api_key_zllama")
+        bu=args.llm_base_url or ac.get("base_url_zllama")
+        ak=args.llm_api_key or ac.get("api_key_zllama")
+        if not ak:
+            for entry in ac.get("llm_api_keys",[]):
+                k=entry.get("api_key") or entry.get("value","")
+                if k:ak=str(k).strip();break
         if bu and ak:
             from openai import OpenAI
             llm=OpenAI(base_url=bu,api_key=ak);log.info("[ref] LLM ready (%s)",bu)
