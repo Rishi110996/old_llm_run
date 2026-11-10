@@ -159,26 +159,24 @@ def main()->int:
     ap=argparse.ArgumentParser(description="Refine YARA via VT Retrohunt.")
     ap.add_argument("--status",action="store_true",help="Show status.")
     ap.add_argument("--rule-id",default=None,help="Refine one rule.")
-    ap.add_argument("--llm-base-url",default=None);ap.add_argument("--llm-api-key",default=None)
     args=ap.parse_args();log=_logger()
     if args.status:show_status(log);return 0
     llm=None
     try:
-        with open(os.path.join(_SD,"config.json"),"r",encoding="utf-8") as f:ac=json.load(f)
-        bu=args.llm_base_url or ac.get("base_url_zllama")
-        ak=args.llm_api_key or ac.get("api_key_zllama")
-        if not ak:
-            for entry in ac.get("llm_api_keys",[]):
-                k=entry.get("api_key") or entry.get("value","")
-                if k:ak=str(k).strip();log.info("[ref] LLM key from llm_api_keys: %s",entry.get("name","?"));break
-        if bu and ak:
-            try:
-                from openai import OpenAI
-                llm=OpenAI(base_url=bu,api_key=ak);log.info("[ref] LLM ready (%s)",bu)
-            except ImportError:
-                log.warning("[ref] openai not installed. Retrohunt runs but rule tweaking skipped.")
-        else:log.warning("[ref] no LLM config. Retrohunt runs but rule tweaking skipped.")
-    except Exception as e:log.warning("[ref] config load error: %s",e)
+        from modified_trial8_multiple_models import (
+            load_runtime_config, load_llm_key_configs, create_llm_client,
+        )
+        cfg=load_runtime_config()
+        key_cfgs=load_llm_key_configs(cfg)
+        if key_cfgs:
+            kc=key_cfgs[0]
+            llm=create_llm_client(kc)
+            log.info("[ref] LLM ready: key=%s base_url=%s",kc.name,kc.base_url)
+        else:
+            log.error("[ref] no LLM keys in config.json — rule tweaking will fail")
+    except Exception as e:
+        log.error("[ref] LLM init failed: %s",e)
+        log.error("[ref] ensure openai is installed: pip install openai>=1.40.0")
     ct=run_refiner(log,rule_id=args.rule_id,llm_client=llm)
     print(json.dumps(ct,indent=2));return 0 if ct.get("error",0)==0 else 1
 
