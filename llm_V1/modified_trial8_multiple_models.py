@@ -44,6 +44,9 @@ _USE_SMBA: bool = False
 _VT_API_KEY: Optional[str] = None
 _SMBA_JSESSIONID: Optional[str] = None  # overrides .env when set via --smba-jsessionid
 _GENERATE_RULES: bool = False           # --generate-rules: Stage 6 YARA/Snort/CIF generation
+_NO_VT_DETECTION: bool = False
+_PIPELINE_SOURCE: str = "manual"        # set by caller: manual | vt_downloader | smba_runner
+_FORCE_REANALYZE: bool = False
 
 
 @dataclass(frozen=True)
@@ -1648,6 +1651,18 @@ def analyze_sample_with_state(
     log_path = os.path.join(report_dir, f"{apk_name}_llm_analysis.log")
     verdict_path = os.path.join(report_dir, f"{apk_name}_verdict.json")
 
+    # -- Central ledger cache check (cross-batch dedup) --
+    if not _FORCE_REANALYZE:
+        try:
+            from androai_ledger import get_ledger
+            _ledger = get_ledger()
+            skip, reason = _ledger.should_skip(sha256)
+            if skip:
+                print(f"[skip] {apk_name} cached in ledger: {reason}")
+                return "skipped_cached"
+        except Exception:
+            pass  # ledger unavailable -- continue normally
+
     existing = state_db.get(sha256)
     if existing and existing.get("status") in TERMINAL_SAMPLE_STATUSES:
         print(f"[skip] {apk_name} already marked {existing['status']}")
@@ -1701,6 +1716,14 @@ def analyze_sample_with_state(
             master_log.write(f"{apk_name}: {json.dumps(payload, ensure_ascii=False)}\n")
             master_log.flush()
             state_db.finish(sha256=sha256, status="corrupt", last_error=parse_error, runner_id=runner_id)
+            try:
+                from androai_ledger import get_ledger
+                get_ledger().record_analysis(
+                    sha256=sha256, apk_name=apk_name, status="corrupt",
+                    error_note=str(parse_error)[:500], analysis_time_sec=elapsed,
+                    pipeline_source=_PIPELINE_SOURCE, runner_id=runner_id,
+                    llm_key_name=llm_key_name, batch_dir=report_dir)
+            except Exception:pass
             return "corrupt"
 
         verdict = analyze_apk_pipeline(apk_path, logger, llm_client, runner_id=runner_id)
@@ -1738,6 +1761,35 @@ def analyze_sample_with_state(
         master_log.flush()
 
         state_db.finish(sha256=sha256, status="done", last_error=None, runner_id=runner_id)
+
+        # -- Record in central ledger --
+        try:
+            from androai_ledger import get_ledger
+            _gen = verdict.get("generated_rules") or {}
+            get_ledger().record_analysis(
+                sha256=sha256, apk_name=apk_name,
+                package_name=str(verdict.get("package_name", "")),
+                family=str((_gen.get("ioc_summary") or {}).get("family", "")),
+                pipeline_source=_PIPELINE_SOURCE,
+                verdict="malicious" if verdict.get("Malicious") else
+                        "suspicious" if verdict.get("Suspicious") else "clean",
+                risk_score=int(verdict.get("Risk-Score", 0)),
+                summary=str(verdict.get("Summary", ""))[:500],
+                status="done", analysis_time_sec=elapsed,
+                started_at=payload.get("started_at", ""),
+                runner_id=runner_id, llm_key_name=llm_key_name,
+                llm_call_count=llm_call_count,
+                llm_total_tokens=llm_total_tokens,
+                yara_created=bool(_gen.get("yara_rule_path")),
+                yara_rule_name=str(_gen.get("yara_rule_path", "")).split(os.sep)[-1] if _gen.get("yara_rule_path") else "",
+                yara_rule_path=str(_gen.get("yara_rule_path", "")),
+                snort_created=bool(_gen.get("snort_rules_path")),
+                cif_created=bool(_gen.get("cif_path")),
+                batch_dir=report_dir,
+            )
+        except Exception as _le:
+            logger.debug("[ledger] record failed (non-fatal): %s", _le)
+
         return "done"
 
     except Exception as e:
@@ -1755,6 +1807,14 @@ def analyze_sample_with_state(
             master_log.write(f"{apk_name}: {json.dumps(payload, ensure_ascii=False)}\n")
             master_log.flush()
             state_db.finish(sha256=sha256, status="corrupt", last_error=str(e), runner_id=runner_id)
+            try:
+                from androai_ledger import get_ledger
+                get_ledger().record_analysis(
+                    sha256=sha256, apk_name=apk_name, status="corrupt",
+                    error_note=str(e)[:500], analysis_time_sec=elapsed,
+                    pipeline_source=_PIPELINE_SOURCE, runner_id=runner_id,
+                    llm_key_name=llm_key_name, batch_dir=report_dir)
+            except Exception:pass
             return "corrupt"
 
         # Detect key exhaustion errors -- both explicit LLMUnavailableError and
@@ -1780,6 +1840,14 @@ def analyze_sample_with_state(
             return "key_unavailable"
 
         state_db.finish(sha256=sha256, status="failed", last_error=str(e), runner_id=runner_id)
+        try:
+            from androai_ledger import get_ledger
+            get_ledger().record_analysis(
+                sha256=sha256, apk_name=apk_name, status="failed",
+                error_note=str(e)[:500], analysis_time_sec=elapsed,
+                pipeline_source=_PIPELINE_SOURCE, runner_id=runner_id,
+                llm_key_name=llm_key_name, batch_dir=report_dir)
+        except Exception:pass
         return "failed"
     finally:
         lease_heartbeat.stop()
@@ -2197,6 +2265,26 @@ if __name__ == "__main__":
             "(Risk-Score >= 70). Rules are saved to llm_V1/generated_rules/."
         ),
     )
+    parser.add_argument(
+        "--pipeline-source",
+        default="manual",
+        help=(
+            "Tag identifying the caller pipeline for ledger tracking. "
+            "E.g. manual, vt_downloader, smba_runner. Default: manual."
+        ),
+    )
+    parser.add_argument(
+        "--force-reanalyze",
+        action="store_true",
+        default=False,
+        help="Ignore the sample cache and re-analyze all samples.",
+    )
+    parser.add_argument(
+        "--init-ledger-passphrase",
+        default=None,
+        metavar="PASSPHRASE",
+        help="Set passphrase for the central analysis ledger on first creation.",
+    )
     args = parser.parse_args()
     _USE_SMBA = bool(args.use_smba)
     if getattr(args, "smba_jsessionid", None):
@@ -2224,6 +2312,19 @@ if __name__ == "__main__":
             print(f"[startup] SMBA will use the token directly from --smba-jsessionid")
     _NO_VT_DETECTION = bool(args.no_vt_detection)
     _GENERATE_RULES = bool(args.generate_rules)
+    _PIPELINE_SOURCE = str(args.pipeline_source or "manual").strip()
+    _FORCE_REANALYZE = bool(args.force_reanalyze)
+
+    # Initialize central ledger (best-effort, never blocks startup)
+    try:
+        from androai_ledger import get_ledger
+        _lpp = getattr(args, "init_ledger_passphrase", None)
+        get_ledger(passphrase=_lpp)
+        if args.force_reanalyze:
+            print("[startup] --force-reanalyze: sample cache will be bypassed")
+    except Exception as _ledger_exc:
+        print(f"[startup] ledger init (non-fatal): {_ledger_exc}")
+
     if args.vt_enrich:
         import vt_enrichment as _vt_mod
         _vt_config_path = _vt_mod.resolve_vt_config_path()
