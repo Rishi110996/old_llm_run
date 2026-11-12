@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS sample_cache(
     verdict             TEXT NOT NULL,
     risk_score          INTEGER DEFAULT 0,
     analyzed_at         TEXT NOT NULL,
-    ttl_days            INTEGER DEFAULT 90,
+    ttl_hours           INTEGER DEFAULT 120,
     force_reanalyze     INTEGER DEFAULT 0
 );
 """
@@ -212,19 +212,19 @@ class AndroAILedger:
         c.commit()
         # Also upsert sample_cache
         if status in("done","corrupt"):
-            ttl=90
+            ttl_h=120
             try:
                 cfg_path=os.path.join(_SD,"config.json")
                 with open(cfg_path,"r",encoding="utf-8") as f:cfg=json.load(f)
-                ttl=cfg.get("sample_cache",{}).get("ttl_days",90)
+                ttl_h=cfg.get("sample_cache",{}).get("ttl_hours",90)
             except Exception:pass
             c.execute(
-                "INSERT INTO sample_cache(sha256,verdict,risk_score,analyzed_at,ttl_days,force_reanalyze) "
+                "INSERT INTO sample_cache(sha256,verdict,risk_score,analyzed_at,ttl_hours,force_reanalyze) "
                 "VALUES(?,?,?,?,?,0) "
                 "ON CONFLICT(sha256) DO UPDATE SET verdict=excluded.verdict,"
                 "risk_score=excluded.risk_score,analyzed_at=excluded.analyzed_at,"
-                "ttl_days=excluded.ttl_days,force_reanalyze=0",
-                (sha256,verdict,risk_score,now,ttl))
+                "ttl_hours=excluded.ttl_hours,force_reanalyze=0",
+                (sha256,verdict,risk_score,now,ttl_h))
             c.commit()
         self._after_write()
 
@@ -242,7 +242,7 @@ class AndroAILedger:
             except Exception:pass
             if not enabled:return False,""
             row=self._conn().execute(
-                "SELECT verdict,risk_score,analyzed_at,ttl_days,force_reanalyze "
+                "SELECT verdict,risk_score,analyzed_at,ttl_hours,force_reanalyze "
                 "FROM sample_cache WHERE sha256=?",(sha256,)).fetchone()
             if not row:return False,""
             if row["force_reanalyze"]:return False,"force_reanalyze set"
@@ -250,9 +250,9 @@ class AndroAILedger:
             # Check TTL
             try:
                 analyzed=datetime.strptime(row["analyzed_at"],"%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-                expires=analyzed+timedelta(days=row["ttl_days"])
+                expires=analyzed+timedelta(hours=row["ttl_hours"])
                 if datetime.now(timezone.utc)<expires:
-                    return True,f"cached {row['verdict']} (risk={row['risk_score']}) analyzed {row['analyzed_at']}, ttl={row['ttl_days']}d"
+                    return True,f"cached {row['verdict']} (risk={row['risk_score']}) analyzed {row['analyzed_at']}, ttl={row['ttl_hours']}h"
             except Exception:pass
             return False,""
         except Exception:return False,""
