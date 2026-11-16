@@ -322,6 +322,9 @@ def build_rule_prompt(selected,facts,asmt,verdict,examples,fam,sha):
         "CRITICAL: Do NOT use full package-qualified strings (com.xxxxx.yyyyy.bot.sms/SmsReceiver). "
         "The package prefix is randomized per variant. Use the path SUFFIX only "
         "(e.g. 'bot.sms.SmsReceiver' or 'bot/sms/SmsReceiver' or 'InjAccessibilityService').\n"
+        "IMPORTANT: Add a filetype check in the condition to avoid matching non-Android files. "
+        "Use: (uint32(0) == 0x04034B50 or uint32(0) == 0x6465780A) "
+        "which restricts matches to ZIP/APK files (PK header) or DEX files (dex\\n header).\n"
         "meta: threatname, category, risk=127, date, author=pipeline-auto.\n"
         "Return ONLY the YARA rule. No markdown.\n")
     us=f"SAMPLE: {fam}|SHA={sha[:16]}...|Risk={verdict.get('Risk-Score',0)}\n"
@@ -483,7 +486,7 @@ def _register_in_db(rule_name,family,category,sha256_src,rule_text,file_path,run
             rule_name=rule_name,family=family,category=category,
             sha256_source=sha256_src,rule_text=rule_text,
             rule_file_path=file_path,runner_id=runner_id,
-            max_refinement_rounds=max_rounds,
+            max_refinement_rounds=max_rounds,source="pipeline",
         )
         reg.close()
         logger.info("[rule_gen] registry: %s -> %s (id=%s)",rule_name,action,rule_id)

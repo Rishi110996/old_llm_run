@@ -88,7 +88,7 @@ def is_clean_rule(name:str,text:str)->bool:
 def import_file(filepath:str,reg:YaraRuleRegistry,*,
                 target_status:str="draft",skip_clean:bool=True,
                 family_filter:str="",name_pattern:str="",
-                dry_run:bool=False)->dict:
+                dry_run:bool=False,source:str="pipeline")->dict:
     """Import rules from one .yara file. Returns counts dict."""
     ct={"imported":0,"duplicate":0,"superseded":0,"skipped_clean":0,"skipped_filter":0,"error":0}
     try:
@@ -124,7 +124,7 @@ def import_file(filepath:str,reg:YaraRuleRegistry,*,
                 rule_name=rule_name,family=family,category=category,
                 sha256_source="imported",rule_text=rule_text,
                 rule_file_path=os.path.abspath(filepath),
-                runner_id="import_existing")
+                runner_id="import_existing",source=source)
             if action=="registered":
                 # If target is approved, immediately promote from draft
                 if target_status!="draft":
@@ -182,7 +182,7 @@ def main()->int:
     if args.file:
         if not args.status:
             print("ERROR: --status is required when using --file",file=sys.stderr);return 1
-        jobs.append((os.path.abspath(args.file),args.status))
+        jobs.append((os.path.abspath(args.file),args.status,args.source or 'pipeline'))
     elif args.dir:
         if not args.status:
             print("ERROR: --status is required when using --dir",file=sys.stderr);return 1
@@ -212,10 +212,10 @@ def main()->int:
 
     print(f"\nProcessing {len(jobs)} file(s)...{'  [DRY RUN]' if args.dry_run else ''}\n")
 
-    for filepath,target_status in jobs:
+    for filepath,target_status,src in jobs:
         print(f"\n--- {os.path.basename(filepath)} -> {target_status} ---")
         ct=import_file(filepath,reg,target_status=target_status,
-                       skip_clean=skip_clean,family_filter=args.family,
+                       skip_clean=skip_clean,family_filter=args.family,source=src,
                        name_pattern=args.rule_name,dry_run=args.dry_run)
         for k,v in ct.items():totals[k]=totals.get(k,0)+v
 
