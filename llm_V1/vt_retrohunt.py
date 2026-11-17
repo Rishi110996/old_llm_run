@@ -3,7 +3,7 @@ from __future__ import annotations
 import json,logging,os,re,shutil,subprocess,time
 from dataclasses import dataclass
 from datetime import datetime,timezone
-from typing import Any,Callable,Dict,List,Optional,Tuple
+from typing import Any,Dict,List,Optional,Tuple
 import requests
 
 _SD=os.path.dirname(os.path.abspath(__file__))
@@ -45,19 +45,15 @@ def create_retrohunt_job(rule,key,log,*,corpus="main",days=90)->Optional[str]:
     except Exception as e:log.error("[rh] create err: %s",e);return None
 
 def abort_retrohunt_job(jid,key,log)->bool:
-    """Abort/delete a running retrohunt job."""
     try:
         r=requests.delete(f"{_VT}/intelligence/retrohunt_jobs/{jid}",headers={"x-apikey":key},timeout=15)
-        if r.ok or r.status_code==404:
-            log.info("[rh] job %s aborted",jid);return True
+        if r.ok or r.status_code==404:log.info("[rh] job %s aborted",jid);return True
         log.warning("[rh] abort HTTP %d for %s",r.status_code,jid);return False
     except Exception as e:log.warning("[rh] abort err: %s",e);return False
 
-def poll_retrohunt_job(jid,key,log,*,interval=120,timeout=14400,
-                       early_fp_check=None)->Dict[str,Any]:
-    """Poll until finished. If early_fp_check callback is provided and returns
-    FP data while the job is still running, aborts the job and returns early."""
-    t0=time.time();checked_at_progress=0.0
+def poll_retrohunt_job(jid,key,log,*,interval=120,timeout=14400,match_cap=1000)->Dict[str,Any]:
+    """Poll until finished or match_cap exceeded. Aborts if matches>cap while running."""
+    t0=time.time()
     while True:
         if time.time()-t0>timeout:
             log.warning("[rh] poll timeout %s",jid)
@@ -68,24 +64,15 @@ def poll_retrohunt_job(jid,key,log,*,interval=120,timeout=14400,
             if not r.ok:time.sleep(interval);continue
             a=r.json().get("data",{}).get("attributes",{})
             s=a.get("status","");p=float(a.get("progress",0));n=int(a.get("num_matches",0))
-            log.info("[rh] %s status=%s %.0f%% matches=%d",jid,s,p*100,n)
+            log.info("[rh] %s status=%s %.0f%% matches=%d (cap=%d)",jid,s,p*100,n,match_cap)
             if s in("finished","completed"):
                 return{"status":"finished","progress":100.0,"num_matches":n,"finished":True}
             if s in("aborted","error"):
                 return{"status":s,"progress":p*100,"num_matches":n,"finished":True}
-            # Early FP detection while job is still running
-            if early_fp_check and s=="running" and n>0 and p>checked_at_progress+0.10:
-                checked_at_progress=p
-                log.info("[rh] early FP check at %.0f%% (%d matches)...",p*100,n)
-                early_matches=get_matching_files(jid,key,log,limit=20)
-                early_result=early_fp_check(early_matches)
-                if early_result and early_result.get("confirmed_fps",0)>0:
-                    log.warning("[rh] early FP detected at %.0f%%! %d confirmed FPs. Aborting.",
-                                p*100,early_result["confirmed_fps"])
-                    abort_retrohunt_job(jid,key,log)
-                    return{"status":"aborted_early_fp","progress":p*100,
-                           "num_matches":n,"finished":True,
-                           "early_fp_data":early_result}
+            if n>match_cap and s not in("finished","completed"):
+                log.warning("[rh] %d matches > cap %d at %.0f%% -- ABORTING %s",n,match_cap,p*100,jid)
+                abort_retrohunt_job(jid,key,log)
+                return{"status":"aborted_cap","progress":p*100,"num_matches":n,"finished":True}
         except Exception as e:log.warning("[rh] poll err: %s",e)
         time.sleep(interval)
 def get_matching_files(jid,key,log,*,limit=300)->List[Dict[str,Any]]:
@@ -110,7 +97,7 @@ def get_matching_files(jid,key,log,*,limit=300)->List[Dict[str,Any]]:
             cur=str(nx).split("cursor=")[-1].split("&")[0] if "cursor=" in str(nx) else None
             if not cur:break
         except Exception as e:log.warning("[rh] match err: %s",e);break
-    log.info("[rh] %d matches for %s",len(ms),jid);return ms
+    log.info("[rh] %d matches fetched for %s",len(ms),jid);return ms
 
 @dataclass
 class FPClassification:
@@ -118,7 +105,6 @@ class FPClassification:
     is_suspicious_fp:bool;is_confirmed_fp:bool;reason:str="";type_tag:str=""
 
 def _is_android_file(match)->bool:
-    """Check if a retrohunt match is an Android-related file."""
     tt=str(match.get("type_tag","")).lower()
     tags=set(str(t).lower() for t in match.get("tags",[]))
     name=str(match.get("meaningful_name","")).lower()
@@ -152,12 +138,10 @@ def _check_relations_clean(sha,key,log)->Tuple[bool,str]:
     return(True,"clean") if not sigs else(False,"; ".join(sigs))
 
 def classify_matches(matches,key,log)->Tuple[List[FPClassification],int,int]:
-    res=[];cfp=0;sfp=0;skipped_non_apk=0
+    res=[];cfp=0;sfp=0;skipped=0
     for m in matches:
         sha=m["sha256"];mal=m.get("malicious",0);tt=m.get("type_tag","")
-        # Skip non-Android files entirely
-        if not _is_android_file(m):
-            skipped_non_apk+=1;continue
+        if not _is_android_file(m):skipped+=1;continue
         if mal>0:res.append(FPClassification(sha,mal,False,False,False,False,f"tp:{mal}",tt));continue
         log.info("[fp] potential FP: %s (type=%s)",sha[:16],tt)
         if _check_parents(sha,key,log):
@@ -167,10 +151,8 @@ def classify_matches(matches,key,log)->Tuple[List[FPClassification],int,int]:
             cfp+=1;res.append(FPClassification(sha,0,True,False,False,True,f"confirmed_fp:{reason}",tt))
         else:
             sfp+=1;res.append(FPClassification(sha,0,True,False,True,False,f"sus_fp:{reason}",tt))
-    if skipped_non_apk:
-        log.info("[fp] skipped %d non-Android matches (PE/PDF/etc)",skipped_non_apk)
-    log.info("[fp] %d android matches: %d TP, %d sus, %d confirmed FP",
-             len(res),sum(1 for r in res if not r.is_potential_fp),sfp,cfp)
+    if skipped:log.info("[fp] skipped %d non-Android matches",skipped)
+    log.info("[fp] %d android: %d TP, %d sus, %d confirmed FP",len(res),sum(1 for r in res if not r.is_potential_fp),sfp,cfp)
     return res,cfp,sfp
 
 def download_sample(sha,key,dest_dir,log)->Optional[str]:
@@ -186,16 +168,12 @@ def download_sample(sha,key,dest_dir,log)->Optional[str]:
     except Exception as e:log.warning("[rh] dl err %s: %s",sha[:16],e);return None
 
 def _yara_exe()->Optional[str]:
-    # Environment variable first (same as scan_with_yara.py)
     env=os.environ.get("YARA_BIN")
     if env and (os.path.isfile(env) or shutil.which(env)):return env
-    # System PATH
     e=shutil.which("yara") or shutil.which("yara64")
     if e:return e
-    # Common Linux paths
     for p in["/usr/bin/yara","/usr/local/bin/yara"]:
         if os.path.isfile(p):return p
-    # Windows bundled
     for n in("yara64.exe","yara64","yara"):
         p=os.path.join(_SD,"yara-master-v4.5.4-win64",n)
         if os.path.isfile(p):return p
@@ -203,7 +181,7 @@ def _yara_exe()->Optional[str]:
 
 def identify_matched_strings(rule_path,sample_path,log)->List[str]:
     exe=_yara_exe()
-    if not exe:log.error("[rh] YARA binary not found! Install yara or set YARA_BIN env var.");return[]
+    if not exe:log.error("[rh] YARA binary not found!");return[]
     try:
         r=subprocess.run([exe,"-s",rule_path,sample_path],capture_output=True,text=True,timeout=60)
         ms=[]
