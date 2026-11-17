@@ -167,6 +167,8 @@ def main()->int:
         help="Only import rules whose name matches this regex.")
     ap.add_argument("--include-clean",action="store_true",default=False,
         help="Include knownclean / risk=0 rules (skipped by default).")
+    ap.add_argument("--sync-zintel",action="store_true",default=False,
+        help="Re-import yara_exports/ as zintel/approved. Run via cron after yara export updates.")
     ap.add_argument("--dry-run",action="store_true",default=False,
         help="Preview what would be imported without writing to DB.")
     args=ap.parse_args()
@@ -179,7 +181,13 @@ def main()->int:
     # Each entry: (filepath, target_status)
     jobs:List[Tuple[str,str]]=[]
 
-    if args.file:
+    if args.sync_zintel:
+        yd=os.path.join(_SD,"yara_exports")
+        if os.path.isdir(yd):
+            for f in sorted(os.listdir(yd)):
+                if f.endswith(".yara"):jobs.append((os.path.join(yd,f),"approved","zintel"))
+        if not jobs:print("No .yara files in yara_exports/");return 0
+    elif args.file:
         if not args.status:
             print("ERROR: --status is required when using --file",file=sys.stderr);return 1
         jobs.append((os.path.abspath(args.file),args.status,args.source or 'pipeline'))
@@ -205,7 +213,7 @@ def main()->int:
 
     # Group by status for display
     by_status={}
-    for fp,st in jobs:
+    for fp,st,_src in jobs:
         by_status.setdefault(st,[]).append(fp)
     for st,fps in sorted(by_status.items()):
         print(f"\n  {len(fps)} file(s) -> {st}")
