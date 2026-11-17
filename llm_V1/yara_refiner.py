@@ -44,7 +44,7 @@ def _validate_rule(txt,log)->bool:
     try:
         with tempfile.NamedTemporaryFile(mode="w",suffix=".yara",delete=False,encoding="utf-8") as f:
             f.write(txt);tp=f.name
-        r=subprocess.run([exe,"-C",tp],capture_output=True,text=True,timeout=30)
+        r=subprocess.run([exe,tp,tp],capture_output=True,text=True,timeout=30)
         os.unlink(tp)
         if r.returncode!=0:log.warning("[ref] compile err: %s",r.stderr[:300]);return False
         return True

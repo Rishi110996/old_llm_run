@@ -63,7 +63,7 @@ def poll_retrohunt_job(jid,key,log,*,interval=120,timeout=14400,match_cap=1000)-
             if r.status_code==429:time.sleep(interval);continue
             if not r.ok:time.sleep(interval);continue
             a=r.json().get("data",{}).get("attributes",{})
-            s=a.get("status","");p=float(a.get("progress",0));n=int(a.get("num_matches",0))
+            s=a.get("status","");p_raw=float(a.get("progress",0));p=p_raw/100.0 if p_raw>1.0 else p_raw;n=int(a.get("num_matches",0))
             log.info("[rh] %s status=%s %.0f%% matches=%d (cap=%d)",jid,s,p*100,n,match_cap)
             if s in("finished","completed"):
                 return{"status":"finished","progress":100.0,"num_matches":n,"finished":True}
