@@ -322,8 +322,6 @@ def build_rule_prompt(selected,facts,asmt,verdict,examples,fam,sha):
         "CRITICAL: Do NOT use full package-qualified strings (com.xxxxx.yyyyy.bot.sms/SmsReceiver). "
         "The package prefix is randomized per variant. Use the path SUFFIX only "
         "(e.g. 'bot.sms.SmsReceiver' or 'bot/sms/SmsReceiver' or 'InjAccessibilityService').\n"
-        "The package prefix is randomized per variant. Use the path SUFFIX only "
-        "(e.g. 'bot.sms.SmsReceiver' or 'bot/sms/SmsReceiver' or 'InjAccessibilityService').\n"
         "NOTE: Do NOT add filetype magic checks (uint32) - these rules run on APK dump .bin files.\n"
         "meta: threatname, category, risk=127, date, author=pipeline-auto.\n"
         "Return ONLY the YARA rule. No markdown.\n")
