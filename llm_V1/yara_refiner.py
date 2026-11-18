@@ -193,6 +193,7 @@ def refine_one_rule(rule,reg,vt_keys,cfg,log,llm_client=None)->str:
             if not pr["finished"]:return _reject(reg,rule.rule_id,f"retrohunt_timeout_R{rn}",log)
 
             was_aborted_cap=(pr["status"]=="aborted_cap")
+            was_early_fp=(pr["status"]=="aborted_early_fp")
             total_matches=pr["num_matches"]
 
             # Fetch matches for classification
@@ -231,7 +232,7 @@ def refine_one_rule(rule,reg,vt_keys,cfg,log,llm_client=None)->str:
 
         reg.update_status(rule.rule_id,"refining",fp_count=cfp,suspicious_fp_count=sfp)
 
-        if cfp<=mcfp and not was_aborted_cap:
+        if cfp<=mcfp and not was_aborted_cap and not was_early_fp:
             log.info("[ref] APPROVED R%d: %d cfp, %d sfp, %d matches",rn,cfp,sfp,total_matches)
             reg.update_status(rule.rule_id,"approved");return"approved"
 

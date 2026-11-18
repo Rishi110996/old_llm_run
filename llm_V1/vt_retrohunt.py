@@ -1,7 +1,7 @@
 """vt_retrohunt.py - VT Retrohunt API client + FP analysis + IOC validation."""
 from __future__ import annotations
 import json,logging,os,re,shutil,subprocess,time
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from datetime import datetime,timezone
 from typing import Any,Dict,List,Optional,Tuple
 import requests
@@ -13,9 +13,10 @@ def _now():return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 @dataclass
 class VTKeyInfo:
-    name:str;key:str;active_jobs:int=0
+    name:str;key:str;tier:str="premium";active_jobs:int=0
 
-def load_all_premium_keys()->List[VTKeyInfo]:
+def load_all_keys()->List[VTKeyInfo]:
+    """Load ALL VT keys (premium + free) from config.yaml."""
     try:import yaml
     except ImportError:return[]
     p=os.path.join(os.path.dirname(_SD),"vt_apk_downloader","config.yaml")
@@ -24,14 +25,30 @@ def load_all_premium_keys()->List[VTKeyInfo]:
         with open(p,"r",encoding="utf-8") as f:cfg=yaml.safe_load(f)
         ks=[]
         for e in cfg.get("api",{}).get("keys",[]):
-            if e.get("tier")=="premium" and e.get("key"):
-                ks.append(VTKeyInfo(name=e.get("name",f"p{len(ks)+1}"),key=str(e["key"])))
+            if e.get("key"):
+                ks.append(VTKeyInfo(
+                    name=e.get("name",f"key{len(ks)+1}"),
+                    key=str(e["key"]),
+                    tier=e.get("tier","free")))
         return ks
     except Exception:return[]
 
-def pick_best_key(keys,max_jobs=3)->Optional[VTKeyInfo]:
-    el=[k for k in keys if k.active_jobs<max_jobs]
-    return min(el,key=lambda k:k.active_jobs) if el else None
+# Backward compat alias
+load_all_premium_keys=load_all_keys
+
+def pick_best_key(keys,max_jobs=3,prefer_premium=True)->Optional[VTKeyInfo]:
+    """Pick the key with fewest active jobs. Prefers premium keys."""
+    eligible=[k for k in keys if k.active_jobs<max_jobs]
+    if not eligible:return None
+    if prefer_premium:
+        prem=[k for k in eligible if k.tier=="premium"]
+        if prem:return min(prem,key=lambda k:k.active_jobs)
+    return min(eligible,key=lambda k:k.active_jobs)
+
+def pick_premium_key(keys,max_jobs=3)->Optional[VTKeyInfo]:
+    """Pick a premium key only (for quota-heavy operations)."""
+    prem=[k for k in keys if k.tier=="premium" and k.active_jobs<max_jobs]
+    return min(prem,key=lambda k:k.active_jobs) if prem else None
 
 def create_retrohunt_job(rule,key,log,*,corpus="main",days=90)->Optional[str]:
     now=int(time.time())
@@ -50,10 +67,28 @@ def abort_retrohunt_job(jid,key,log)->bool:
         if r.ok or r.status_code==404:log.info("[rh] job %s aborted",jid);return True
         log.warning("[rh] abort HTTP %d for %s",r.status_code,jid);return False
     except Exception as e:log.warning("[rh] abort err: %s",e);return False
+def _quick_fp_rate(matches)->Tuple[int,int,float]:
+    """Quick FP check using AV detection count only (no extra API calls).
+    Returns (fp_count, tp_count, fp_rate)."""
+    android=[m for m in matches if _is_android_file(m)]
+    if not android:return 0,0,0.0
+    fp=sum(1 for m in android if m.get("malicious",0)==0)
+    tp=len(android)-fp
+    rate=fp/len(android) if android else 0.0
+    return fp,tp,rate
 
-def poll_retrohunt_job(jid,key,log,*,interval=120,timeout=14400,match_cap=1000)->Dict[str,Any]:
-    """Poll until finished or match_cap exceeded. Aborts if matches>cap while running."""
-    t0=time.time()
+def poll_retrohunt_job(jid,key,log,*,interval=30,timeout=14400,
+                       match_cap=1000,early_fp_sample=20,
+                       early_fp_threshold=0.5)->Dict[str,Any]:
+    """Poll until finished, cap exceeded, or early FP detected.
+
+    Three abort conditions:
+    1. num_matches > match_cap (absolute cap)
+    2. Early FP sampling: at every 10%% progress, fetch a small sample
+       of matches. If >early_fp_threshold (50%%) are FPs, abort.
+    3. Timeout
+    """
+    t0=time.time();last_check_pct=-10.0
     while True:
         if time.time()-t0>timeout:
             log.warning("[rh] poll timeout %s",jid)
@@ -63,29 +98,51 @@ def poll_retrohunt_job(jid,key,log,*,interval=120,timeout=14400,match_cap=1000)-
             if r.status_code==429:time.sleep(interval);continue
             if not r.ok:time.sleep(interval);continue
             a=r.json().get("data",{}).get("attributes",{})
-            s=a.get("status","");p_raw=float(a.get("progress",0));p=p_raw/100.0 if p_raw>1.0 else p_raw;n=int(a.get("num_matches",0))
-            log.info("[rh] %s status=%s %.0f%% matches=%d (cap=%d)",jid,s,p*100,n,match_cap)
-            # CHECK CAP FIRST -- before checking finished status
-            # Jobs can finish between polls (2min gap), so we must
-            # catch over-cap even on finished jobs
+            s=a.get("status","")
+            p_raw=float(a.get("progress",0))
+            p=p_raw/100.0 if p_raw>1.0 else p_raw
+            n=int(a.get("num_matches",0))
+            pct=round(p*100,1)
+            log.info("[rh] %s status=%s %.1f%% matches=%d (cap=%d)",jid,s,pct,n,match_cap)
+
+            # 1. CHECK CAP FIRST (catches finished jobs with too many matches)
             if n>match_cap:
                 if s not in("finished","completed"):
-                    log.warning("[rh] %d matches > cap %d at %.0f%% -- ABORTING %s",n,match_cap,p*100,jid)
+                    log.warning("[rh] %d > cap %d at %.1f%% -- ABORTING %s",n,match_cap,pct,jid)
                     abort_retrohunt_job(jid,key,log)
                 else:
-                    log.warning("[rh] %d matches > cap %d -- job already finished, treating as over-cap %s",n,match_cap,jid)
-                return{"status":"aborted_cap","progress":p*100,"num_matches":n,"finished":True}
+                    log.warning("[rh] %d > cap %d (finished) -- over-cap %s",n,match_cap,jid)
+                return{"status":"aborted_cap","progress":pct,"num_matches":n,"finished":True}
+
+            # 2. EARLY FP SAMPLING (every ~10%% progress, if matches exist)
+            if n>0 and s not in("finished","completed") and pct>=last_check_pct+10:
+                last_check_pct=pct
+                log.info("[rh] early FP check at %.1f%% (%d matches)...",pct,n)
+                try:
+                    sample=get_matching_files(jid,key,log,limit=early_fp_sample)
+                    if sample:
+                        fp_cnt,tp_cnt,fp_rate=_quick_fp_rate(sample)
+                        log.info("[rh] early sample: %d files, %d FP, %d TP, %.0f%% FP rate",
+                                 len(sample),fp_cnt,tp_cnt,fp_rate*100)
+                        if fp_rate>early_fp_threshold and fp_cnt>=3:
+                            log.warning("[rh] %.0f%% FP rate at %.1f%% -- ABORTING %s",
+                                        fp_rate*100,pct,jid)
+                            abort_retrohunt_job(jid,key,log)
+                            return{"status":"aborted_early_fp","progress":pct,
+                                   "num_matches":n,"finished":True,
+                                   "early_fp_sample":sample,"early_fp_rate":fp_rate}
+                except Exception as efp:
+                    log.debug("[rh] early FP check failed (non-fatal): %s",efp)
+
+            # 3. Normal completion checks
             if s in("finished","completed"):
                 return{"status":"finished","progress":100.0,"num_matches":n,"finished":True}
             if s in("aborted","error"):
-                return{"status":s,"progress":p*100,"num_matches":n,"finished":True}
-            # This block is now unreachable but kept for safety
-            if False:
-                log.warning("[rh] %d matches > cap %d at %.0f%% -- ABORTING %s",n,match_cap,p*100,jid)
-                abort_retrohunt_job(jid,key,log)
-                return{"status":"aborted_cap","progress":p*100,"num_matches":n,"finished":True}
+                return{"status":s,"progress":pct,"num_matches":n,"finished":True}
+
         except Exception as e:log.warning("[rh] poll err: %s",e)
         time.sleep(interval)
+
 def get_matching_files(jid,key,log,*,limit=300)->List[Dict[str,Any]]:
     ms=[];cur=None
     while True:
