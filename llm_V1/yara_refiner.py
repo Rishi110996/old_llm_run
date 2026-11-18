@@ -11,7 +11,7 @@ _MAX_CAP_ESCALATIONS=5  # max times we bump the cap before giving up
 def _load_cfg()->Dict[str,Any]:
     defs={"enabled":True,"max_refinement_rounds":3,"max_concurrent_retrohunt_jobs_per_key":3,
         "retrohunt_corpus":"main","goodware_prescreen":True,"retrohunt_time_range_days":90,
-        "poll_interval_sec":120,"poll_timeout_sec":14400,"max_acceptable_clean_fps":0,
+        "poll_interval_sec":30,"poll_timeout_sec":14400,"max_acceptable_clean_fps":0,
         "max_acceptable_suspicious_fps":5,"fp_sample_download_count":5,
         "max_matches_before_abort":1000}
     try:

@@ -65,11 +65,22 @@ def poll_retrohunt_job(jid,key,log,*,interval=120,timeout=14400,match_cap=1000)-
             a=r.json().get("data",{}).get("attributes",{})
             s=a.get("status","");p_raw=float(a.get("progress",0));p=p_raw/100.0 if p_raw>1.0 else p_raw;n=int(a.get("num_matches",0))
             log.info("[rh] %s status=%s %.0f%% matches=%d (cap=%d)",jid,s,p*100,n,match_cap)
+            # CHECK CAP FIRST -- before checking finished status
+            # Jobs can finish between polls (2min gap), so we must
+            # catch over-cap even on finished jobs
+            if n>match_cap:
+                if s not in("finished","completed"):
+                    log.warning("[rh] %d matches > cap %d at %.0f%% -- ABORTING %s",n,match_cap,p*100,jid)
+                    abort_retrohunt_job(jid,key,log)
+                else:
+                    log.warning("[rh] %d matches > cap %d -- job already finished, treating as over-cap %s",n,match_cap,jid)
+                return{"status":"aborted_cap","progress":p*100,"num_matches":n,"finished":True}
             if s in("finished","completed"):
                 return{"status":"finished","progress":100.0,"num_matches":n,"finished":True}
             if s in("aborted","error"):
                 return{"status":s,"progress":p*100,"num_matches":n,"finished":True}
-            if n>match_cap and s not in("finished","completed"):
+            # This block is now unreachable but kept for safety
+            if False:
                 log.warning("[rh] %d matches > cap %d at %.0f%% -- ABORTING %s",n,match_cap,p*100,jid)
                 abort_retrohunt_job(jid,key,log)
                 return{"status":"aborted_cap","progress":p*100,"num_matches":n,"finished":True}
