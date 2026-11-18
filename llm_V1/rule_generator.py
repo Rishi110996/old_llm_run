@@ -322,9 +322,12 @@ def build_rule_prompt(selected,facts,asmt,verdict,examples,fam,sha):
         "CRITICAL: Do NOT use full package-qualified strings (com.xxxxx.yyyyy.bot.sms/SmsReceiver). "
         "The package prefix is randomized per variant. Use the path SUFFIX only "
         "(e.g. 'bot.sms.SmsReceiver' or 'bot/sms/SmsReceiver' or 'InjAccessibilityService').\n"
-        "IMPORTANT: Add a filetype check in the condition to avoid matching non-Android files. "
-        "Use: (uint32(0) == 0x04034B50 or uint32(0) == 0x6465780A) "
-        "which restricts matches to ZIP/APK files (PK header) or DEX files (dex\\n header).\n"
+        "MANDATORY: The condition MUST start with a filetype check. Without it the rule will match "
+        "XML, PE, PDF and other non-Android files causing thousands of false positives.\n"
+        "Use this EXACT line as the FIRST part of the condition:\n"
+        "    (uint32(0) == 0x04034B50 or uint32(0) == 0x6465780A) and\n"
+        "This restricts to ZIP/APK (PK\\x03\\x04 header) and DEX (dex\\n header) files ONLY.\n"
+        "Do NOT omit this. Every rule MUST have it.\n"
         "meta: threatname, category, risk=127, date, author=pipeline-auto.\n"
         "Return ONLY the YARA rule. No markdown.\n")
     us=f"SAMPLE: {fam}|SHA={sha[:16]}...|Risk={verdict.get('Risk-Score',0)}\n"
@@ -554,6 +557,21 @@ def _validate_cif_iocs(cif_entries,vt_api_key,logger):
         logger.warning("[rule_gen] cif IOC validation error: %s",e)
         return cif_entries
 
+def _ensure_filetype_check(rule_text,logger):
+    """If the LLM omitted the filetype check, inject it into the condition."""
+    ft="uint32(0) == 0x04034B50"
+    if ft in rule_text:
+        return rule_text  # already has it
+    # Find "condition:" and inject filetype check as first line
+    m=re.search(r'(condition\s*:\s*\n?)',rule_text,re.I)
+    if not m:
+        logger.warning("[rule_gen] could not find condition: block to inject filetype check")
+        return rule_text
+    inject=m.group(1)+"        (uint32(0) == 0x04034B50 or uint32(0) == 0x6465780A) and\n"
+    rule_text=rule_text[:m.start()]+inject+rule_text[m.end():]
+    logger.info("[rule_gen] injected filetype check into condition (LLM omitted it)")
+    return rule_text
+
 def generate_rules(apk_path,apk_facts,evidence_items,clusters,assessments,verdict,yara_matches,logger,llm_client,vt_api_key=None,runner_id=""):
     from modified_trial8_multiple_models import call_llm
     fam=_family(verdict,yara_matches); cat=_category(assessments)
@@ -594,7 +612,9 @@ def generate_rules(apk_path,apk_facts,evidence_items,clusters,assessments,verdic
                 ps=sum(len(m.get("content","")) for m in rule_msgs)
                 logger.info("[rule_gen] Phase 3 prompt=%d chars",ps)
                 raw=call_llm(rule_msgs,MODEL,logger,llm_client)
-                yara=_strip_md(_raw_text(raw)); out["yara_rule"]=yara
+                yara=_strip_md(_raw_text(raw))
+                yara=_ensure_filetype_check(yara,logger)
+                out["yara_rule"]=yara
                 val=_validate(yara,bf,logger); out["yara_validation"]=val
                 if val["compiles"] and val["self_matches"]:
                     fn=f"Android_{cat}_{fam}_{ss}_{dtag}.yara"
