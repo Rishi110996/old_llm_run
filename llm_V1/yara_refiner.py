@@ -30,11 +30,11 @@ def _logger()->logging.Logger:
     lg.setLevel(logging.INFO);return lg
 
 def _strip_md(t):
-    ls=t.strip().splitlines()
-    if ls and ls[0].strip().startswith("```"):ls=ls[1:]
-    if ls and ls[-1].strip().startswith("```"):ls=ls[:-1]
-    return"\n".join(ls).strip()
-
+    import re as _r
+    t=_r.sub(r"``" + "`" + r"\w*\n?","",t).strip()
+    m=_r.search(r"(rule\s+\w+[\s\S]*\})",t)
+    if m: t=m.group(1).strip()
+    return t
 def _validate_rule(txt,log)->bool:
     from rule_generator import _yara_exe
     exe=_yara_exe()
