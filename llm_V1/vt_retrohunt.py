@@ -50,7 +50,20 @@ def pick_premium_key(keys,max_jobs=3)->Optional[VTKeyInfo]:
     prem=[k for k in keys if k.tier=="premium" and k.active_jobs<max_jobs]
     return min(prem,key=lambda k:k.active_jobs) if prem else None
 
+def inject_filetype_check(rule_text):
+    """Inject ZIP/APK/DEX filetype check into condition for VT retrohunt.
+    Rules run on bin dumps locally (no magic check needed), but on VT
+    they scan raw files so we must restrict to Android file types."""
+    ft="uint32(0) == 0x04034B50"
+    if ft in rule_text:return rule_text
+    import re as _r
+    m=_r.search(r"(condition\s*:\s*\n?)",rule_text,_r.I)
+    if not m:return rule_text
+    inject=m.group(1)+"        (uint32(0) == 0x04034B50 or uint32(0) == 0x6465780A) and\n"
+    return rule_text[:m.start()]+inject+rule_text[m.end():]
+
 def create_retrohunt_job(rule,key,log,*,corpus="main",days=90)->Optional[str]:
+    rule=inject_filetype_check(rule)  # ensure ZIP/APK/DEX only on VT
     now=int(time.time())
     body={"data":{"type":"retrohunt_job","attributes":{"rules":rule,"corpus":corpus,"time_range":{"start":now-days*86400,"end":now}}}}
     try:

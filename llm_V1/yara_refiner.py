@@ -113,7 +113,7 @@ def _tweak_prompt(rule,fp_info,family,match_count=0,was_too_broad=False,rule_rec
         "unique class names, hardcoded creds, malware paths\n"
         "3. BAD strings: lifecycle methods, accessibility APIs, "
         "library classes, HTTP headers, content providers\n"
-        "4. Keep filetype: (uint32(0)==0x04034B50 or uint32(0)==0x6465780A)\n"
+        "4. Do NOT add uint32 filetype checks - they are added automatically\n"
         "5. Use class path SUFFIX only (not full package)\n"
         "6. Condition must require enough strings to avoid clean apps\n"
         +sdk_warn+broad+
