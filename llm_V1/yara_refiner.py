@@ -48,22 +48,84 @@ def _validate_rule(txt,log)->bool:
         return True
     except Exception:return True
 
-def _tweak_prompt(rule,fp_info,family,match_count=0,was_too_broad=False):
+_SDK_NOISE={"classes.dex","AndroidManifest.xml","resources.arsc",
+    "EndpointConfigManager","endpointConfigManager","crashUploadManager",
+    "COMMAND_GET_TEXT","COMMAND_GET_METADATA","COMMAND_GET_TIMELINE",
+    "BaseGlShaderProgram","DebugViewShaderProgram",
+    "ALLOW_CAPTURE_BY_ALL","ALLOW_CAPTURE_BY_NONE","ALLOW_CAPTURE_BY_SYSTEM",
+    "ACTION_SET_TEXT","ACTION_CLICK","ACTION_LONG_CLICK",
+    "ACTION_ACCESSIBILITY_FOCUS","setScreenReaderFocusable","setPaneTitle",
+    "injectScriptCode","injectScriptFile","injectStyleCode","injectStyleFile",
+    "isDirectInjection","describeInjection","waitUntilActivityReady",
+    "HmsMessageServiceOneSignal","https://default.url",
+    "SharedPreferences","HttpURLConnection","application/json",
+    "libsigner.so","libdatastore_shared_counter.so","safeModeManager"}
+
+def _find_sdk_in_rule(rule_text):
+    import re as _r
+    found=[]
+    for m in _r.finditer(r'\$\w+\s*=\s*"([^"]+)"',rule_text):
+        v=m.group(1)
+        if v in _SDK_NOISE or v.startswith(("android.","androidx.","com.google.")):
+            found.append(v)
+    return found
+
+def _load_verdict_ctx(rec):
+    import glob,json as _j
+    ctx={"summary":"","iocs":[]}
+    rp=getattr(rec,"rule_file_path","") if rec else ""
+    if not rp:return ctx
+    rd=os.path.dirname(rp)
+    for pat in[os.path.join(rd,"..","*_verdict.json"),os.path.join(rd,"..","..","*_verdict.json")]:
+        for vf in glob.glob(pat)[:3]:
+            try:
+                with open(vf,"r",encoding="utf-8") as f:data=_j.load(f)
+                v=data.get("verdict",data)
+                if isinstance(v,dict) and v.get("Summary"):
+                    ctx["summary"]=str(v["Summary"])[:500]
+                    ctx["iocs"]=v.get("IOCs",[])[:20] if isinstance(v.get("IOCs"),list) else []
+                    break
+            except Exception:continue
+    return ctx
+
+def _tweak_prompt(rule,fp_info,family,match_count=0,was_too_broad=False,rule_record=None):
+    sdk_in=_find_sdk_in_rule(rule)
+    sdk_warn=""
+    if sdk_in:
+        sdk_warn=("\n\nWARNING - THESE STRINGS ARE COMMON SDK/LIBRARY (REMOVE THEM):\n"
+            +"\n".join(f'  - "{s}" (found in clean apps, MUST REMOVE)' for s in sdk_in)+"\n")
+    ctx=_load_verdict_ctx(rule_record)
     fps=[]
     for fp in fp_info:
-        fps.append(f"  - {fp['sha256'][:16]}... ({fp['reason']})\n    Triggered: {', '.join(fp['matched_strings']) or 'unknown'}")
+        tr=fp.get("matched_strings",[])
+        fps.append(f"  - {fp['sha256'][:16]}... ({fp['reason']})\n    Matched: {', '.join(tr) or 'unknown'}")
     broad=""
     if was_too_broad:
-        broad=(f"\nCRITICAL: This rule matched {match_count} files -- WAY too broad!\n"
-            "Make it MUCH more specific: more required strings, stricter conditions, filesize limits.\n")
-    sy=("You are an expert YARA rule author for Android malware.\n"
-        "Revise the rule to ELIMINATE FPs while keeping malware detection.\n"
-        "IMPORTANT: Keep filetype check: (uint32(0)==0x04034B50 or uint32(0)==0x6465780A)\n"
-        +broad+"Return ONLY the revised YARA rule. No markdown.\n")
-    us=(f"FAMILY: {family}\n\nORIGINAL RULE:\n{rule}\n\n"
-        f"FP ANALYSIS ({len(fp_info)} samples):\n"+"\n".join(fps)+"\n\nRevise the rule.\n")
+        broad=(f"\nCRITICAL: Rule matched {match_count} files! Strings are TOO GENERIC.\n"
+            "1. Remove ALL SDK strings listed above\n"
+            "2. Use ONLY strings unique to this malware\n"
+            "3. Require MORE strings in condition\n")
+    sy=("You are an expert YARA rule author for Android malware.\n\n"
+        "TASK: Revise a rule causing FALSE POSITIVES on clean apps.\n\n"
+        "RULES:\n"
+        "1. REMOVE any SDK/Jetpack/Media3/library string\n"
+        "2. Keep ONLY malware-unique strings: C2 domains, bot commands, "
+        "unique class names, hardcoded creds, malware paths\n"
+        "3. BAD strings: lifecycle methods, accessibility APIs, "
+        "library classes, HTTP headers, content providers\n"
+        "4. Keep filetype: (uint32(0)==0x04034B50 or uint32(0)==0x6465780A)\n"
+        "5. Use class path SUFFIX only (not full package)\n"
+        "6. Condition must require enough strings to avoid clean apps\n"
+        +sdk_warn+broad+
+        "Return ONLY the revised YARA rule. No explanation. No markdown.\n")
+    us=f"MALWARE FAMILY: {family}\n\n"
+    if ctx["summary"]:us+=f"ANALYSIS SUMMARY:\n{ctx['summary']}\n\n"
+    if ctx["iocs"]:us+="IOCs:\n"+"\n".join(f"  - {i}" for i in ctx["iocs"][:15])+"\n\n"
+    us+=f"CURRENT RULE ({len(fp_info)} FALSE POSITIVES, {match_count} total matches):\n{rule}\n\n"
+    us+=f"FP ANALYSIS (yara -s on {len(fp_info)} clean samples):\n"+"\n".join(fps)+"\n\n"
+    us+="Rewrite using ONLY malware-specific strings.\n"
+    if len(sy)+len(us)>28000:us=us[:28000-len(sy)]
     return[{"role":"system","content":sy},{"role":"user","content":us}]
-
 def _reject(reg,rid,reason,log):
     log.warning("[ref] REJECTED %s: %s",rid,reason)
     reg.update_status(rid,"rejected",rejection_reason=reason)
@@ -185,7 +247,7 @@ def refine_one_rule(rule,reg,vt_keys,cfg,log,llm_client=None)->str:
             return _reject(reg,rule.rule_id,f"fp_analysis_failed_R{rn}",log)
 
         from modified_trial8_multiple_models import call_llm
-        raw=call_llm(_tweak_prompt(txt,fpi,rule.family,total_matches,was_aborted_cap),
+        raw=call_llm(_tweak_prompt(txt,fpi,rule.family,total_matches,was_aborted_cap,rule_record=rule),
                      "claude-sonnet-4-6",log,llm_client)
         nr=_strip_md(raw.get("summary",str(raw)) if isinstance(raw,dict) else str(raw))
         if not _validate_rule(nr,log):
